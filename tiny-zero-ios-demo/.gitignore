@@ -1,0 +1,13 @@
+# Generated inputs (large binaries produced by the support scripts)
+third_party/
+
+# xcodebuild DerivedData
+build/
+
+# Generated Xcode project (recreate with: xcodegen generate)
+*.xcodeproj
+
+# Java build scratch
+build-java/
+# Generated simulator jmod/jlink workspace
+work-generated/
