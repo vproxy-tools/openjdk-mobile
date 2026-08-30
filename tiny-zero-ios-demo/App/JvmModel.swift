@@ -16,9 +16,90 @@ final class JvmModel {
         case idle, starting, running, stopping
     }
 
+    /// One console line as styled runs: the program's raw line with ANSI
+    /// escape sequences parsed into segments, so only the parts actually
+    /// covered by a color code are colored (vproxy colors just the
+    /// timestamp/level prefix). `plainText` (for the persisted log) has all
+    /// escapes stripped.
+    struct LogLine {
+        struct Segment {
+            var text: String
+            var color: Int // ANSI SGR foreground (30-37/90-97); 0 = default
+        }
+
+        var segments: [Segment]
+
+        var plainText: String { segments.map(\.text).joined() }
+
+        /// Parses the raw line: SGR color sequences (ESC [ … m) start new
+        /// segments; every other escape sequence is dropped.
+        init(raw: String) {
+            var segments: [Segment] = []
+            var text = ""
+            var color = 0
+            var i = raw.startIndex
+            while i < raw.endIndex {
+                let c = raw[i]
+                if c != "\u{1B}" {
+                    text.append(c)
+                    i = raw.index(after: i)
+                    continue
+                }
+                // Escape sequence: ESC '[' … final-byte, or ESC + one byte.
+                var j = raw.index(after: i)
+                if j < raw.endIndex, raw[j] == "[" {
+                    var params = ""
+                    var final: Character?
+                    j = raw.index(after: j)
+                    scan: while j < raw.endIndex {
+                        let fc = raw[j]
+                        if let a = fc.asciiValue, a >= 0x40, a <= 0x7E {
+                            final = fc
+                        } else {
+                            params.append(fc)
+                            j = raw.index(after: j)
+                            continue
+                        }
+                        break scan
+                    }
+                    if final == "m" {
+                        if !text.isEmpty {
+                            segments.append(Segment(text: text, color: color))
+                            text = ""
+                        }
+                        color = Self.applySgr(params, previous: color)
+                    }
+                    i = (j < raw.endIndex) ? raw.index(after: j) : j
+                } else {
+                    i = (j < raw.endIndex) ? raw.index(after: j) : j
+                }
+            }
+            segments.append(Segment(text: text, color: color))
+            self.segments = segments
+        }
+
+        init(plain: String) {
+            self.segments = [Segment(text: plain, color: 0)]
+        }
+
+        /// Applies one SGR parameter list ("0;32"); the last color wins and
+        /// 0 resets to default.
+        private static func applySgr(_ params: String, previous: Int) -> Int {
+            var result = previous
+            for token in params.split(separator: ";", omittingEmptySubsequences: false) {
+                guard let code = Int(token.trimmingCharacters(in: .whitespaces)) else { continue }
+                if (30...37).contains(code) || (90...97).contains(code) {
+                    result = code
+                } else if code == 0 {
+                    result = 0
+                }
+            }
+            return result
+        }
+    }
+
     struct PersistedState: Codable {
         var phase: Phase = .idle
-        var port: Int = 8080
         var startedAt: Date? = nil
         var lastLogAt: Date? = nil
         var backgroundMode: String = ""
@@ -28,12 +109,11 @@ final class JvmModel {
     // MARK: observable state
 
     private(set) var phase: Phase = .idle
-    var portText: String = "8080"
     /// Mode switch: on = the JVM runs under a background task
     /// (BGContinuedProcessingTask / beginBackgroundTask); off = the JVM is
     /// started directly in foreground mode with no background claim.
     var useBackgroundTask: Bool = true
-    private(set) var logLines: [String] = []
+    private(set) var logLines: [LogLine] = []
     private(set) var errorMessage: String? = nil
     private(set) var elapsedSeconds: TimeInterval = 0
     private(set) var backgroundMode: String = ""
@@ -52,6 +132,9 @@ final class JvmModel {
     private var documents: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
     }
+    /// The app's data container root: passed as -Duser.home, so vproxy puts
+    /// all of its state (including .vproxy/) inside the sandbox.
+    private var containerDir: URL { documents.deletingLastPathComponent() }
     private var logFile: URL { documents.appendingPathComponent("java-console.log") }
     private var stateFile: URL { documents.appendingPathComponent("java-state.json") }
 
@@ -71,14 +154,13 @@ final class JvmModel {
                 let when = state.lastLogAt.map { DateFormatter.localizedString(from: $0, dateStyle: .short, timeStyle: .medium) } ?? "?"
                 errorMessage = "上次会话在进程被终止时中断(最后活动:\(when))。日志已从磁盘恢复。"
             }
-            portText = String(state.port)
         }
         if let tail = readLogTail() {
             logLines = tail
         }
     }
 
-    private func readLogTail() -> [String]? {
+    private func readLogTail() -> [LogLine]? {
         guard let handle = try? FileHandle(forReadingFrom: logFile) else { return nil }
         defer { try? handle.close() }
         let size = (try? logFile.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
@@ -88,12 +170,12 @@ final class JvmModel {
         }
         let data = (try? handle.readToEnd()) ?? Data()
         let text = String(data: data, encoding: .utf8) ?? ""
-        return text.split(separator: "\n").suffix(Self.maxLogLines).map(String.init)
+        return text.split(separator: "\n").suffix(Self.maxLogLines).map { LogLine(plain: String($0)) }
     }
 
     // MARK: test automation hooks
 
-    /// Supports `simctl launch ... -autostart <port> [-direct]` and
+    /// Supports `simctl launch ... -autostart [-direct]` and
     /// `-autostop <seconds>` so the demo can be verified end-to-end without
     /// UI interaction (used by the documented simulator test flow).
     /// `-direct` starts the JVM in foreground mode (no background task).
@@ -103,8 +185,7 @@ final class JvmModel {
         if args.contains("-direct") {
             useBackgroundTask = false
         }
-        if let i = args.firstIndex(of: "-autostart"), i + 1 < args.count {
-            portText = args[i + 1]
+        if args.contains("-autostart") {
             start()
         }
         if let i = args.firstIndex(of: "-autostop"), i + 1 < args.count,
@@ -130,10 +211,6 @@ final class JvmModel {
 
     func start() {
         guard canStart else { return }
-        guard let port = Int(portText.trimmingCharacters(in: .whitespaces)), (1...65535).contains(port) else {
-            errorMessage = "端口无效:\(portText)(需要 1–65535 的数字)"
-            return
-        }
 
         stopRequested = false
         errorMessage = nil
@@ -144,7 +221,7 @@ final class JvmModel {
             // claim at all. Useful to isolate JVM behaviour from the
             // BGContinuedProcessingTask/beginBackgroundTask machinery.
             backgroundMode = "前台模式(直接运行,无后台任务)"
-            launchJVM(port: port)
+            launchJVM()
             return
         }
 
@@ -154,7 +231,7 @@ final class JvmModel {
         // There is deliberately no degradation: a failed submit is reported
         // and the JVM is not started.
         guard backgroundExecution.begin(onLaunch: { [weak self] in
-            DispatchQueue.main.async { self?.launchJVM(port: port) }
+            DispatchQueue.main.async { self?.launchJVM() }
         }, onExpire: { [weak self] in
             DispatchQueue.main.async { self?.handleBackgroundExpired() }
         }, onFail: { [weak self] message in
@@ -185,21 +262,23 @@ final class JvmModel {
         #endif
     }
 
-    private func launchJVM(port: Int) {
+    private func launchJVM() {
         guard phase == .starting else { return }
 
         // The runtime image folder reference is bundled as "lib"
         // (<bundle>/lib/lib/modules, see support/build-sim-jvm.sh).
         guard let libDir = Bundle.main.path(forResource: "lib", ofType: nil),
               FileManager.default.fileExists(atPath: libDir + "/lib/modules"),
-              let jar = Bundle.main.path(forResource: "TinyHttpServer", ofType: "jar") else {
+              let vproxyJar = Bundle.main.path(forResource: "vproxy", ofType: "jar"),
+              let bootstrapJar = Bundle.main.path(forResource: "vproxy-ios-bootstrap", ofType: "jar") else {
             phase = .idle
-            errorMessage = "bundle 资源不完整:需要 \(Bundle.main.bundlePath)/lib/lib/modules 与 TinyHttpServer.jar;请重跑 support/build-sim-jvm.sh 和 support/build-java.sh"
+            errorMessage = "bundle 资源不完整:需要 \(Bundle.main.bundlePath)/lib/lib/modules、vproxy.jar 与 vproxy-ios-bootstrap.jar;请重跑 support/build-sim-jvm.sh 和 support/build-java.sh"
             appendLog("[app] \(errorMessage!)")
             return
         }
 
-        let rc = tinyvm_start(libDir, jar, Int32(port),
+        let jarPaths = "\(vproxyJar):\(bootstrapJar)"
+        let rc = tinyvm_start(libDir, jarPaths, containerDir.path,
                               { JvmModel.shared.handleLogLine($0) },
                               { JvmModel.shared.handleExit($0, $1) })
         if rc != 0 {
@@ -215,7 +294,7 @@ final class JvmModel {
         startedAt = Date()
         elapsedSeconds = 0
         phase = .running
-        appendLog("=== 会话开始 \(Date().description(with: .current)) 端口=\(port) 模式=\(backgroundExecution.displayName) ===")
+        appendLog("=== 会话开始 \(Date().description(with: .current)) 模式=\(backgroundExecution.displayName) ===")
         startTicking()
         persistState()
     }
@@ -250,7 +329,7 @@ final class JvmModel {
 
     private func handleLogLine(_ raw: UnsafePointer<CChar>?) {
         guard let raw else { return }
-        let line = String(cString: raw)
+        let line = LogLine(raw: String(cString: raw))
         DispatchQueue.main.async { [weak self] in
             self?.appendLog(line)
             self?.persistState() // refreshes lastLogAt for relaunch reporting
@@ -320,12 +399,12 @@ final class JvmModel {
 
     // MARK: persistence
 
-    private func appendLog(_ line: String) {
+    private func appendLog(_ line: LogLine) {
         logLines.append(line)
         if logLines.count > Self.maxLogLines {
             logLines.removeFirst(logLines.count - Self.maxLogLines)
         }
-        let data = Data((line + "\n").utf8)
+        let data = Data((line.plainText + "\n").utf8)
         ioQueue.async { [logFile] in
             if let handle = try? FileHandle(forWritingTo: logFile) {
                 defer { try? handle.close() }
@@ -337,10 +416,13 @@ final class JvmModel {
         }
     }
 
+    private func appendLog(_ text: String) {
+        appendLog(LogLine(plain: text))
+    }
+
     private func persistState(exitReason: String? = nil) {
         let state = PersistedState(
             phase: phase,
-            port: Int(portText) ?? 0,
             startedAt: startedAt,
             lastLogAt: Date(),
             backgroundMode: backgroundExecution.displayName,

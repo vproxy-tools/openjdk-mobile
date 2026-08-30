@@ -11,7 +11,9 @@ targets:
     sources:
       - path: App
       - path: Native
-      - path: third_party/TinyHttpServer.jar
+      - path: third_party/vproxy.jar
+        buildPhase: resources
+      - path: third_party/vproxy-ios-bootstrap.jar
         buildPhase: resources
       # Blue folder reference copied into the bundle as "lib/". The statically
       # linked iOS JVM derives java_home = <bundle>/lib and then opens

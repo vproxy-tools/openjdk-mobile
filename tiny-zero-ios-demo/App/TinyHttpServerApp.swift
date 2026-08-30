@@ -16,7 +16,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 @main
 struct TinyHttpServerApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @State private var model = JvmModel()
+    // Must be the shared instance: the native bridge's log/exit callbacks
+    // target JvmModel.shared, so a separate instance here would leave the
+    // UI console without any JVM output.
+    @State private var model = JvmModel.shared
 
     var body: some Scene {
         WindowGroup {

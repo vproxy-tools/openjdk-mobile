@@ -2,9 +2,10 @@
 set -euo pipefail
 
 # End-to-end simulator demo: build everything that is missing, install the
-# app on an iPhone 13 (iOS 26.5) simulator, start the embedded JVM with the
-# HTTP server, and verify it with curl. Safe to re-run; each stage is
-# incremental or idempotent.
+# app on an iPhone 13 (iOS 26.5) simulator, start the embedded JVM running
+# vproxy with -Deploy=helloworld (HTTP+UDP responder on port 8080), and
+# verify it with curl. Safe to re-run; each stage is incremental or
+# idempotent.
 
 DEMO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TINY_ROOT="${TINY_ROOT:-$DEMO_ROOT/../tiny-zero-ios-build}"
@@ -13,7 +14,7 @@ APP_ID="com.wkgcass.TinyHttpServer"
 DEVICE="iPhone 13"
 RUNTIME="com.apple.CoreSimulator.SimRuntime.iOS-26-5"
 DEVTYPE="com.apple.CoreSimulator.SimDeviceType.iPhone-13"
-PORT="${PORT:-8080}"
+PORT="${PORT:-8080}" # vproxy helloworld listens here
 
 cd "$DEMO_ROOT"
 
@@ -35,7 +36,7 @@ echo "==> [1/4] simulator libffi (skipped automatically if installed)"
 ./support/build-sim-libffi.sh
 echo "==> [2/4] simulator Zero JVM + patched runtime image"
 ./support/build-sim-jvm.sh
-echo "==> [3/4] demo jar"
+echo "==> [3/4] demo jars (vproxy + bootstrap helper)"
 ./support/build-java.sh
 echo "==> [4/4] Xcode project + app"
 xcodegen generate >/dev/null
@@ -54,8 +55,8 @@ xcrun simctl terminate "$DEVICE" "$APP_ID" 2>/dev/null || true
 xcrun simctl uninstall "$DEVICE" "$APP_ID" 2>/dev/null || true
 xcrun simctl install "$DEVICE" "$APP"
 
-echo "==> launching (JVM bootstrap takes 1-4 min on the cold zero interpreter)"
-xcrun simctl launch "$DEVICE" "$APP_ID" -autostart "$PORT" -direct \
+echo "==> launching vproxy -Deploy=helloworld (bootstrap takes 1-4+ min on the zero interpreter)"
+xcrun simctl launch "$DEVICE" "$APP_ID" -autostart -direct \
   | sed 's/^/    pid /'
 
 ok=""

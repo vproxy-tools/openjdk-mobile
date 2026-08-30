@@ -11,3 +11,6 @@ build/
 build-java/
 # Generated simulator jmod/jlink workspace
 work-generated/
+
+# macOS Finder metadata
+.DS_Store

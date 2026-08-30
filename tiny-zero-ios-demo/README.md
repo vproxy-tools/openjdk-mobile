@@ -1,8 +1,8 @@
-# Tiny Zero iOS Demo — TinyHttpServer
+# Tiny Zero iOS Demo — vproxy
 
-在 iOS app 内嵌 OpenJDK Mobile **Zero JVM**,运行一个监听 `127.0.0.1:<port>` 的
-迷你 HTTP server(任何请求都返回同一个 HTML 页面:JVM 信息、系统时间与全部
-`System.getProperties()`),并通过 iOS 26 的
+在 iOS app 内嵌 OpenJDK Mobile **Zero JVM**,运行**未经修改的 vproxy**
+(`-Deploy=helloworld`:8080 端口的 HTTP+UDP 应答服务,启动时自带 TCP/UDP
+自检),并通过 iOS 26 的
 `BGContinuedProcessingTask` 在后台长期运行(以 30 天为进度窗口);
 模拟器与 iOS<26 走 `beginBackgroundTask` 回退。
 
@@ -19,7 +19,7 @@ tiny-zero-ios-demo/
 ├── project.yml                  # xcodegen 工程定义(生成 TinyHttpServer.xcodeproj)
 ├── App/
 │   ├── TinyHttpServerApp.swift  # 入口 + AppDelegate(BGTask 注册必须在启动早期)
-│   ├── ContentView.swift        # UI:端口/后台任务开关/启停/30天进度/错误/控制台
+│   ├── ContentView.swift        # UI:启停/后台任务开关/30天进度/错误/控制台(无端口输入)
 │   ├── JvmModel.swift           # @Observable 状态机、日志与状态持久化、C 回调桥
 │   ├── BackgroundExecution.swift# 原生 BGContinuedProcessingTask(非反射)+ 回退实现
 │   ├── Info.plist               # xcodegen 生成管理(BGTaskSchedulerPermittedIdentifiers)
@@ -27,19 +27,42 @@ tiny-zero-ios-demo/
 ├── Native/
 │   ├── jvm_bridge.h/.mm         # JNI 桥:CreateJavaVM/RegisterNatives/线程/停止/日志回调
 │   └── ios_wx_shims.mm          # weak 符号补齐(见 §5 链接要求)
-├── Java/TinyHttpServer.java     # Java 侧 HTTP server(纯 java.base)
+├── Java/IosBootstrap.java       # stdout/stderr 原样逐行转发;vproxy 本体零修改
 ├── support/
 │   ├── run-sim-demo.sh          # ★ 一键复现:构建→安装→启动→curl 验证(幂等)
 │   ├── build-sim-libffi.sh      # 交叉编译 iOS Simulator 版 libffi(首次,装到 ~/ios-sim-support)
 │   ├── build-sim-jvm.sh         # Zero variant 模拟器 JVM(修复已合入仓库)+
 │   │                            #   jmod/jlink 产出 runtime image
-│   └── build-java.sh            # Boot JDK javac → third_party/TinyHttpServer.jar
+│   └── build-java.sh            # 编译 IosBootstrap + 拷贝 vproxy.jar → third_party/
 ├── third_party/                 # 构建产物(gitignore,由脚本生成)
 ├── work-generated/              # sim jmod/jlink 中间产物(gitignore)
 └── build/                       # xcodebuild 输出(gitignore)
 ```
 
-## 2. 一键复现(已实测)
+## 2. 从零构建与一键复现
+
+### 2.0 全新机器的完整链路(从 0 到模拟器跑通)
+
+三段式,每段一次性完成后均可反复增量运行:
+
+1. **设备流水线**(基础,约 30–60 分钟):按
+   [`../tiny-zero-ios-build/README.md`](../tiny-zero-ios-build/README.md)
+   §1–§3 准备外部依赖(Boot JDK 28、Gluon libffi/CUPS 支持包、autoconf),
+   `cp config/build.env.example config/build.env` 填好本机路径,然后
+   `cd tiny-zero-ios-build && ./build.sh`。它产出真机静态库与 runtime
+   image,同时为模拟器准备好源码树(`work/mobile`)与配置——模拟器
+   构建完全复用这一步。
+2. **vproxy**:`git clone --recursive https://github.com/wkgcass/vproxy`
+   放到本仓库同级目录,在其中执行
+   `git submodule update --init --recursive && ./gradlew shadowjar`
+   (产物 `build/libs/vproxy.jar`;**若该文件已存在则跳过整个构建步骤**,
+   后续脚本只做拷贝)。
+3. **模拟器 demo**:`cd tiny-zero-ios-demo && ./support/run-sim-demo.sh`
+   —— 自动完成模拟器创建/启动、sim libffi、Zero JVM、jar、app 构建、
+   安装、`-autostart -direct` 启动与 curl 验证;想看 app 界面再
+   `open -a Simulator`(见下文"手动启动与 GUI 模拟器")。
+
+### 一键复现(已实测)
 
 ```bash
 cd tiny-zero-ios-demo
@@ -48,23 +71,25 @@ cd tiny-zero-ios-demo
 
 脚本幂等,自动完成:创建/启动 iPhone 13(iOS 26.5)模拟器 → 编译缺失的
 libffi/Zero JVM/jar/app → ad-hoc 补签 entitlement → 安装 →
-`-autostart 8080 -direct` 启动 → 轮询 curl 直到 HTTP 200 → 打印响应与
-落盘日志。实测从清空产物到 200 约 3 分钟(其中 OpenJDK 静态库构建 ~2:50,
+`-autostart -direct` 启动 → 轮询 curl 直到 HTTP 200 → 打印响应与
+落盘日志。helloworld 固定监听 8080(HTTP+UDP)。实测从清空产物到 200 约 3 分钟(其中 OpenJDK 静态库构建 ~2:50,
 JVM 引导 ~10 秒)。
 
 实测输出(节选):
 
 ```
 HTTP/1.1 200 OK
-Content-Type: text/html; charset=utf-8
-<h1>Hello from the Tiny Zero JVM &#x1f34f;</h1>
-<p>servedRequests=2, uptime=9s</p>
-<h2>System time</h2>
-<p><code>2026-08-30T10:45:52.948Z</code> …(epoch ms、zone: Asia/Shanghai、本地时间)</p>
-<h2>System.getProperties()</h2>
-… 46 项排序后的属性表(java.version / java.vm.name / java.home / os.name …)
+content-length: 26
+
+vproxy 1.0.0-BETA-13-DEV
 --- Documents/java-console.log ---
-1788036896029 http: 127.0.0.1 "GET / HTTP/1.1"
+[native] wrote <容器>/.vproxy/resolv.conf
+trying to get name servers from <容器>/.vproxy/resolv.conf   ← vproxy 用的是写入的文件
+HTTP server is listening on 8080
+Making request: GET /hello
+TCP seems OK
+UDP client receives a message from server: hello world
+UDP seems OK
 ```
 
 ### 前置条件
@@ -72,6 +97,7 @@ Content-Type: text/html; charset=utf-8
 | 依赖 | 说明 |
 | --- | --- |
 | `../tiny-zero-ios-build` | 先完成 Tiny Zero 构建(`./build.sh`),提供源码树、Boot JDK、CUPS 配置(`config/build.env`) |
+| vproxy 源码 | `git clone --recursive https://github.com/wkgcass/vproxy` 后执行 `git submodule update --init --recursive && ./gradlew shadowjar`,产物为 `build/libs/vproxy.jar`(**已存在则跳过构建**,脚本只做拷贝);demo **零修改**直接使用。默认取本仓库同级的 `../vproxy`,也可 `VPROXY_JAR=<路径>` 指定 |
 | Xcode 26+(含 iOS 26.5 模拟器 runtime) | 实测 Xcode 26.6 |
 | `xcodegen` | `brew install xcodegen` |
 | JDK 28 Boot JDK、Gluon 支持包 | 由 tiny-zero-ios-build 的 `config/build.env` 指向 |
@@ -82,7 +108,7 @@ Content-Type: text/html; charset=utf-8
 cd tiny-zero-ios-demo
 ./support/build-sim-libffi.sh      # 首次:模拟器 libffi → ~/ios-sim-support(已装则秒过)
 ./support/build-sim-jvm.sh         # Zero JVM(修复已合入仓库)+ jmod/jlink + conf/tzdb → third_party/
-./support/build-java.sh            # → third_party/TinyHttpServer.jar
+./support/build-java.sh            # → third_party/vproxy.jar + vproxy-ios-bootstrap.jar
 xcodegen generate
 xcodebuild -project TinyHttpServer.xcodeproj -scheme TinyHttpServer \
   -sdk iphonesimulator -configuration Debug -derivedDataPath build \
@@ -100,7 +126,7 @@ xcrun simctl install "iPhone 13" \
   build/Build/Products/Debug-iphonesimulator/TinyHttpServer.app
 
 xcrun simctl launch "iPhone 13" com.wkgcass.TinyHttpServer \
-  -autostart 8080 -direct        # 引导约 10 秒后监听
+  -autostart -direct             # helloworld 固定 8080,引导约 10 秒后监听
 curl -v http://127.0.0.1:8080/   # 模拟器与 Mac 共享 loopback
 CONTAINER=$(xcrun simctl get_app_container "iPhone 13" \
   com.wkgcass.TinyHttpServer data)
@@ -117,7 +143,7 @@ open -a Simulator --args -CurrentDeviceUDID "$(xcrun simctl list devices |
 open -a Simulator
 
 # 启动 app(热启动引导约 10–60 秒后监听,冷启动可达数分钟;UI 可手动交互)
-xcrun simctl launch "iPhone 13" com.wkgcass.TinyHttpServer -autostart 8080 -direct
+xcrun simctl launch "iPhone 13" com.wkgcass.TinyHttpServer -autostart -direct
 #   -direct        前台直启(不申请后台任务)——模拟器上可正常跑通
 #   不带 -direct   走 BGContinuedProcessingTask:模拟器上 submit 必失败
 #                  (code=1),按设计直接报错、JVM 不启动;真机才是真验证
@@ -213,7 +239,25 @@ java.time 的 `ZoneRulesProvider` 初始化会经 boot loader 资源查找走到
 - **NSProgress** 同步 30 天窗口;**持久化**:日志每行落盘
   `Documents/java-console.log`,状态落 `java-state.json`,杀进程重开
   可见中断状态与历史。
-- **`-autostart <port>` / `-autostop <s>` / `-direct`**:自动化验证参数。
+- **载荷与启动参数**(jvm_bridge.mm):classpath = `vproxy.jar:
+  vproxy-ios-bootstrap.jar`,主类 `io.vproxy.app.app.Main`(jar 的
+  Main-Class),main 参数 `-Deploy=helloworld`(等价文档用法
+  `java -jar vproxy.jar -Deploy=helloworld`);vproxy 完全零修改。
+  UI 无端口输入(helloworld 固定 8080)。
+- **DNS 与 user.home**:启动前 native 侧收集系统 DNS(先解析
+  `/etc/resolv.conf` 的 `nameserver` 行,模拟器/macOS 有效;失败则
+  dlopen `libresolv.9.dylib` 走 `res_9_*`,真机路径),写入
+  `<容器>/.vproxy/resolv.conf`,任一失败即明确报错、不启动 JVM;同时
+  传 `-Duser.home=<容器>`,vproxy 的全部状态(含 `.vproxy/`)都落在
+  app 沙盒内,解析器优先读取该文件(vproxy 逻辑:先
+  `${user.home}/.vproxy/resolv.conf` 再 `/etc/resolv.conf`)。
+- **stdout/stderr → app 控制台(分段着色)**:`IosBootstrap`(第二个
+  jar)经 RegisterNatives 注册 `nativeLog`,redirect 后**原样**逐行转发
+  (含 ANSI);Swift 侧解析 SGR 色码做分段渲染——只有色码覆盖的部分
+  着色(vproxy 的 时间戳/级别 前缀:绿 INFO/黄 WARN/红 ERROR),消息
+  正文保持默认白,落盘文件存剥离转义后的纯文本;PNI 原生库缺失时
+  vproxy 自身优雅降级(WARN 后继续)。
+- **`-autostart` / `-autostop <s>` / `-direct`**:自动化验证参数。
 - **停止语义**:按钮为"停止并退出 App"(或 `-autostop`)——停止即
   结束**整个 app 进程**(Java 程序的 `System.exit`/被杀语义)。停止
   开始时即收尾后台任务(NSProgress 走满 → `setTaskCompleted`),UI
@@ -242,11 +286,13 @@ java.time 的 `ZoneRulesProvider` 初始化会经 boot loader 资源查找走到
 JVM 参数(`jvm_bridge.mm`,当前实测值):`-Xrs -Djava.awt.headless=true
 -XX:+UseSerialGC -Xint -XX:+UnlockDiagnosticVMOptions -XX:-ImplicitNullChecks
 -XX:-UseCompactObjectHeaders -Xshare:off -Xms4g -XX:NewSize=1536m -Xss32m
--XX:-StackTraceInThrowable -XX:-RewriteBytecodes`。
+-XX:-StackTraceInThrowable -XX:-RewriteBytecodes -XX:+DisableAttachMechanism
+-Duser.home=<容器> --add-exports=java.base/jdk.internal.misc=ALL-UNNAMED`。
 说明:`-Xms/-Xss/NewSize` 是调试期保守值(实际引导后 heapUsed ≈ 7.5M,
 可按需调小);`-Xint`/`-ImplicitNullChecks`/`-StackTraceInThrowable`
 规避 Darwin 信号路径缺口;`-RewriteBytecodes`/`-UseCompactObjectHeaders`
-为验证期保守项。
+为验证期保守项;`--add-exports` 是 vproxy 启动日志自荐的选项(启用其
+JDKUnsafe 路径,免反射告警)。
 
 ## 6. 已解决的关键问题(排障记录)
 
