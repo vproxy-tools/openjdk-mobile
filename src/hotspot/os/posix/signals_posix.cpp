@@ -657,7 +657,35 @@ int JVM_HANDLE_XXX_SIGNAL(int sig, siginfo_t* info,
 }
 
 // Entry point for the hotspot signal handler.
+// Resolved through dlsym: the SDK headers mark pthread_jit_write_protect_np
+// unavailable on iOS, but it exists in the simulator runtime. The file-scope
+// initializer runs at library load time, before any signal can arrive.
+extern "C" void* dlsym(void*, const char*);
+static void (*const lazy_wx_flip)(int) =
+    (void (*)(int))dlsym((void*)-2 /* RTLD_DEFAULT */, "pthread_jit_write_protect_np");
+
 static void javaSignalHandler(int sig, siginfo_t* info, void* context) {
+#if defined(__APPLE__) && defined(__aarch64__) && \
+    defined(TARGET_OS_SIMULATOR) && TARGET_OS_SIMULATOR
+  // bsd_zero cannot recover from SIGSEGV in the interpreter (its signal path
+  // is unfinished upstream); at least make the fault site visible.
+  if (sig == SIGSEGV && info != nullptr && context != nullptr) {
+    ucontext_t* uc0 = (ucontext_t*)context;
+    ::fprintf(stderr, "[zero-sig] SIGSEGV addr=%p pc=%p\n",
+              info->si_addr, (void*)uc0->uc_mcontext->__ss.__pc);
+  }
+  if (sig == SIGBUS && info != nullptr && info->si_code == BUS_ADRALN
+      && context != nullptr && lazy_wx_flip != nullptr) {
+    ucontext_t* uc = (ucontext_t*)context;
+    uintptr_t pc = (uintptr_t)uc->uc_mcontext->__ss.__pc;
+    if ((uintptr_t)info->si_addr == pc) {
+      lazy_wx_flip(1); // executing a write-protected page
+    } else {
+      lazy_wx_flip(0); // writing an exec-protected page
+    }
+    return;
+  }
+#endif
   // Do not add any code here!
   // Only add code to either JVM_HANDLE_XXX_SIGNAL or PosixSignals::pd_hotspot_signal_handler.
   (void)JVM_HANDLE_XXX_SIGNAL(sig, info, context, true);

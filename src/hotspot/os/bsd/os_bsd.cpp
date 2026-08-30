@@ -1814,6 +1814,9 @@ static char* anon_mmap(char* requested_addr, size_t bytes, bool exec) {
   // MAP_FIXED is intentionally left out, to leave existing mappings intact.
   const int flags = MAP_PRIVATE | MAP_NORESERVE | MAP_ANONYMOUS
 #ifdef __IOS__
+#if defined(TARGET_OS_SIMULATOR) && TARGET_OS_SIMULATOR
+      | (exec ? MAP_JIT : 0) // simulator runs under macOS RWX rules
+#endif
       ;
 #else
       MACOS_ONLY(| (exec ? MAP_JIT : 0));
