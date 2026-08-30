@@ -161,16 +161,28 @@ final class JvmModel {
             DispatchQueue.main.async {
                 guard let self, self.phase == .starting else { return }
                 self.phase = .idle
-                self.errorMessage = "后台任务失败:\(message)"
+                self.errorMessage = "后台任务失败:\(message)\(self.backgroundFailureHint)"
                 self.appendLog("[app] 后台任务失败:\(message)")
                 self.persistState(exitReason: self.errorMessage)
             }
         }) else {
             phase = .idle
-            errorMessage = backgroundExecution.lastError ?? "系统拒绝了后台执行申请,未启动 JVM"
-            appendLog("[app] \(errorMessage ?? "")")
+            errorMessage = (backgroundExecution.lastError ?? "系统拒绝了后台执行申请,未启动 JVM")
+                + backgroundFailureHint
+            appendLog("[app] \(errorMessage!)")
             return
         }
+    }
+
+    /// The continued-processing grant does not exist on the simulator, so a
+    /// background-task failure there is expected: tell the user the concrete
+    /// way out instead of a dead end. On device there is nothing to add.
+    private var backgroundFailureHint: String {
+        #if targetEnvironment(simulator)
+        return "(模拟器不支持后台任务;请关闭「后台任务运行 JVM」开关用前台模式重试)"
+        #else
+        return ""
+        #endif
     }
 
     private func launchJVM(port: Int) {
@@ -182,7 +194,8 @@ final class JvmModel {
               FileManager.default.fileExists(atPath: libDir + "/lib/modules"),
               let jar = Bundle.main.path(forResource: "TinyHttpServer", ofType: "jar") else {
             phase = .idle
-            errorMessage = "bundle 里缺少 runtime/ 或 TinyHttpServer.jar"
+            errorMessage = "bundle 资源不完整:需要 \(Bundle.main.bundlePath)/lib/lib/modules 与 TinyHttpServer.jar;请重跑 support/build-sim-jvm.sh 和 support/build-java.sh"
+            appendLog("[app] \(errorMessage!)")
             return
         }
 
@@ -190,10 +203,11 @@ final class JvmModel {
                               { JvmModel.shared.handleLogLine($0) },
                               { JvmModel.shared.handleExit($0, $1) })
         if rc != 0 {
+            let detail = String(cString: tinyvm_last_error())
             backgroundExecution.end()
             phase = .idle
-            errorMessage = "JVM 启动失败:\(String(cString: tinyvm_last_error()))"
-            appendLog("[app] JVM 启动失败:\(String(cString: tinyvm_last_error()))")
+            errorMessage = "JVM 启动失败:\(detail)"
+            appendLog("[app] JVM 启动失败:\(detail)")
             persistState(exitReason: errorMessage)
             return
         }
@@ -224,9 +238,6 @@ final class JvmModel {
                 if rc != 0 {
                     self.errorMessage = "退出未完成(\(String(cString: tinyvm_last_error())));请上滑手动关闭应用"
                 }
-                if self.useBackgroundTask {
-                    self.backgroundExecution.end()
-                }
                 self.phase = .idle
                 self.stopTicking()
                 self.appendLog("=== 会话结束 ===")
@@ -251,9 +262,7 @@ final class JvmModel {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.stopTicking()
-            if self.useBackgroundTask {
-                self.backgroundExecution.end()
-            }
+            self.backgroundExecution.end() // no-op when nothing was claimed
             let wasUserStop = self.stopRequested
             self.phase = .idle
             self.appendLog("[native] JVM 退出 code=\(code) reason=\(why)")

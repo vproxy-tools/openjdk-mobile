@@ -5,12 +5,9 @@
 #include <cstdarg>
 #include <pthread.h>
 
-// Declared with C linkage at file scope: the SDK availability guards vary
-// between macOS/iOS SDK generations.
-extern "C" void pthread_jit_write_protect_np(int enabled) __API_AVAILABLE(macos(11.0), ios(14.0));
-
-// Declared here: the SDK guards it behind availability macros that vary
-// between macOS/iOS SDK generations.
+// Declared with C linkage at file scope instead of including <pthread.h>:
+// the SDK guards this function behind availability macros that vary between
+// macOS/iOS SDK generations.
 extern "C" void pthread_jit_write_protect_np(int enabled) __API_AVAILABLE(macos(11.0), ios(14.0));
 #include <stdio.h>
 #include <stdlib.h>
@@ -228,19 +225,13 @@ extern "C" int tinyvm_stop(int timeout_seconds) {
     return 0;
   }
   // Stop without any program cooperation: call System.exit(0) from the
-  // host, like sending SIGTERM-friendly termination to a regular java
-  // process. java.lang.System is a bootstrap class, so FindClass works from
-  // any attached thread. System.exit runs shutdown hooks and then exits the
-  // whole process (vm_exit -> os::exit) — the embedding iOS app terminates
-  // with it, which is the natural lifecycle for a plain Java program.
-  // Zero program assumptions, single graceful stage: System.exit(0) is the
-  // whole stop mechanism (java.lang.System is a bootstrap class, visible
-  // from any attached thread; on a complete JVM this exits the process
-  // together with its shutdown hooks). The host only observes: if the
-  // upstream exit path stalls it reports an error and never forces.
-  // Stage 1 runs on its own thread: this mobile snapshot's exit path can
-  // deadlock the calling thread inside Runtime.exit (logging), so the stop
-  // flow must not wait on that call returning.
+  // host — the whole process exits with its shutdown hooks, which is the
+  // natural lifecycle for a plain Java program. java.lang.System is a
+  // bootstrap class, so FindClass works from any attached thread.
+  // System.exit runs on its own thread because this mobile snapshot's exit
+  // path can deadlock the calling thread inside Runtime.exit (logging).
+  // The host only observes: if the exit does not complete (an upstream,
+  // intermittent exit-path stall) it reports an error and never forces.
   forward_log("[native] stop: stage 1 System.exit(0)");
   pthread_t exit_thread;
   pthread_create(&exit_thread, nullptr, [](void*) -> void* {

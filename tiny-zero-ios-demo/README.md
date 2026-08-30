@@ -1,13 +1,15 @@
 # Tiny Zero iOS Demo — TinyHttpServer
 
 在 iOS app 内嵌 OpenJDK Mobile **Zero JVM**,运行一个监听 `127.0.0.1:<port>` 的
-迷你 HTTP server(任何请求都返回同一个 HTML 页面),并通过 iOS 26 的
+迷你 HTTP server(任何请求都返回同一个 HTML 页面:JVM 信息、系统时间与全部
+`System.getProperties()`),并通过 iOS 26 的
 `BGContinuedProcessingTask` 在后台长期运行(以 30 天为进度窗口);
 模拟器与 iOS<26 走 `beginBackgroundTask` 回退。
 
 > **状态(2026-08-30)**:模拟器 demo **完整运行并通过从零复现验证**
-> (`support/run-sim-demo.sh`,清空全部产物后单脚本重建,约 3 分钟构建 +
-> 引导 ~10 秒):curl 返回 HTTP 200 与 Tiny Zero HTML,心跳/请求日志落盘,
+> (`support/run-sim-demo.sh`,清空全部产物后单脚本重建,约 3 分钟构建;
+> JVM 引导热启动约 10 秒,冷启动实测可到 1–4 分钟):curl 返回 HTTP 200 与
+> Tiny Zero HTML(含系统时间与 properties 表),心跳/请求日志落盘,
 > `-autostop` 优雅停止。真机(device slice)尚未部署验证。
 
 ## 1. 目录结构
@@ -29,7 +31,7 @@ tiny-zero-ios-demo/
 ├── support/
 │   ├── run-sim-demo.sh          # ★ 一键复现:构建→安装→启动→curl 验证(幂等)
 │   ├── build-sim-libffi.sh      # 交叉编译 iOS Simulator 版 libffi(首次,装到 ~/ios-sim-support)
-│   ├── build-sim-jvm.sh         # Zero variant 模拟器 JVM:5 个受控 patch +
+│   ├── build-sim-jvm.sh         # Zero variant 模拟器 JVM:6 个受控 patch +
 │   │                            #   jmod/jlink 产出 patched runtime image
 │   └── build-java.sh            # Boot JDK javac → third_party/TinyHttpServer.jar
 ├── third_party/                 # 构建产物(gitignore,由脚本生成)
@@ -57,6 +59,10 @@ HTTP/1.1 200 OK
 Content-Type: text/html; charset=utf-8
 <h1>Hello from the Tiny Zero JVM &#x1f34f;</h1>
 <p>servedRequests=2, uptime=9s</p>
+<h2>System time</h2>
+<p><code>2026-08-30T10:45:52.948Z</code> …(epoch ms、zone: Asia/Shanghai、本地时间)</p>
+<h2>System.getProperties()</h2>
+… 46 项排序后的属性表(java.version / java.vm.name / java.home / os.name …)
 --- Documents/java-console.log ---
 1788036896029 http: 127.0.0.1 "GET / HTTP/1.1"
 ```
@@ -75,7 +81,7 @@ Content-Type: text/html; charset=utf-8
 ```bash
 cd tiny-zero-ios-demo
 ./support/build-sim-libffi.sh      # 首次:模拟器 libffi → ~/ios-sim-support(已装则秒过)
-./support/build-sim-jvm.sh         # Zero JVM(5 patch)+ jmod/jlink + conf → third_party/
+./support/build-sim-jvm.sh         # Zero JVM(6 patch)+ jmod/jlink + conf/tzdb → third_party/
 ./support/build-java.sh            # → third_party/TinyHttpServer.jar
 xcodegen generate
 xcodebuild -project TinyHttpServer.xcodeproj -scheme TinyHttpServer \
@@ -110,7 +116,7 @@ open -a Simulator --args -CurrentDeviceUDID "$(xcrun simctl list devices |
 # 或设备已 boot 时简单地:
 open -a Simulator
 
-# 启动 app(引导约 40–60 秒后监听;UI 可手动交互)
+# 启动 app(热启动引导约 10–60 秒后监听,冷启动可达数分钟;UI 可手动交互)
 xcrun simctl launch "iPhone 13" com.wkgcass.TinyHttpServer -autostart 8080 -direct
 #   -direct        前台直启(不申请后台任务)——模拟器上可正常跑通
 #   不带 -direct   走 BGContinuedProcessingTask:模拟器上 submit 必失败
@@ -125,10 +131,10 @@ tail -f "$(xcrun simctl get_app_container "iPhone 13" \
 xcrun simctl terminate "iPhone 13" com.wkgcass.TinyHttpServer
 ```
 
-## 3. 模拟器 JVM:Zero variant、5 个受控 patch 与 runtime image
+## 3. 模拟器 JVM:Zero variant、6 个受控 patch 与 runtime image
 
 模拟器使用 **Zero variant**(与真机 Tiny Zero 相同的解释器路径)。
-`build-sim-jvm.sh` 在源码树上应用 **5 个精确、幂等、失败即停的 source
+`build-sim-jvm.sh` 在源码树上应用 **6 个精确、幂等、失败即停的 source
 patch**(除 #3 外仅影响 `TARGET_OS_SIMULATOR`,对真机构建无行为影响),
 再产出静态库与 runtime image:
 
@@ -158,7 +164,38 @@ configure 侧:`--with-jvm-variants=zero`、`--with-jvm-features="-jfr"`
 runtime image:由 **sim 构建自己的 exploded classes** 做 jmod/jlink
 (含 release 描述符同步与 `--target-platform macos-aarch64`,同 tiny-zero
 流水线的适配),再从 Boot JDK 拷贝 `conf/`(java.security 等,三模块
-jlink 镜像不带)到 `lib/conf`。
+jlink 镜像不带)与 `lib/tzdb.dat`(`sun.util.calendar.ZoneInfoFile` 读取
+`<java_home>/lib/tzdb.dat`,缺失会导致 java.util 时区全部
+`NoClassDefFoundError`)到 `lib/conf`、`lib/lib/`。
+
+**静态链入的内部库与 `System.loadLibrary`**(如 `System.loadLibrary("jimage")`,
+java.time 的 `ZoneRulesProvider` 初始化会经 boot loader 资源查找走到):
+上游本就有完整的静态库协议,本 demo 只补了最后一块——在系统库路径
+(`<bundle>/lib`)放 **0 字节 marker 文件**(`libjimage.dylib`、
+`libj2pkcs11.dylib`)。链条:marker 触发 `NativeLibraries.findBuiltinLib`
+→ 剥掉前后缀后在进程内查 `JNI_OnLoad_<名>`(os_posix 补丁的
+`RTLD_DEFAULT` + `-export_dynamic` + symbol keeper 锚定的
+`DEF_STATIC_JNI_OnLoad` 定义,返回 `JNI_VERSION_1_8`)→ builtin 路径
+**跳过 dlopen**、直接使用进程句柄,后续符号经 RTLD_DEFAULT 解析。
+**保持静态链入、符号已暴露、内部库 loadLibrary 等价于跳过**,零 JVM
+代码改动。
+
+内部库排查结论(交付模块 java.base + jdk.unsupported + jdk.crypto.cryptoki;
+只有 `System.loadLibrary` 失败会抛 `UnsatisfiedLinkError`,
+`BootLoader.loadLibrary` 失败**静默返回 null**、natives 继续经进程符号解析
+——demo 的 ServerSocket/zip 已实证该路径):
+
+| 库 | 加载方式 | 触发点 | 处理 |
+| --- | --- | --- | --- |
+| `jimage` | `System.loadLibrary` | jimage 读取(模块资源/ServiceLoader) | **marker 必需** ✓ |
+| `j2pkcs11` | `System.loadLibrary` | `sun.security.pkcs11.wrapper.PKCS11` clinit(启用 SunPKCS11 时) | **marker 必需** ✓ |
+| `net` | `BootLoader.loadLibrary`×6 | InetAddress/NetworkInterface/IOUtil 等 | 无需;**且不能加**(archive 无 `JNI_OnLoad_net` 定义,加了会落入真 dlopen 报错) |
+| `nio`/`zip` | `BootLoader.loadLibrary` | IOUtil/UnixNativeDispatcher/ZipUtils | 无需(静默;符号已定义,真需要时可照加) |
+| `osxsecurity` | `BootLoader.loadLibrary` | macOS KeychainStore | 库未链入,静默跳过 |
+| `fallbackLinker` | `System.loadLibrary` | 仅 java.lang.foreign 指定 fallback ABI | 库未构建;不使用 FFM 则不触及 |
+
+`jdk.unsupported` 没有任何 loadLibrary 调用(natives 在 libjava/hotspot,
+直接符号解析)。真机 device slice 的 bundle 布局同理适用。
 
 ## 4. App 结构要点
 
@@ -196,7 +233,10 @@ jlink 镜像不带)到 `lib/conf`。
    classloader 查找为空):`jvm_bridge.mm` 注册了 `nativeLog`。
 5. bundle 布局:静态 iOS JVM 推导 `java_home = <可执行目录>/lib`
    (`-Djava.home` 会被覆盖),因此必须是
-   **`<bundle>/lib/lib/modules` + `<bundle>/lib/conf/`**。
+   **`<bundle>/lib/lib/modules` + `<bundle>/lib/conf/` +
+   `<bundle>/lib/lib/tzdb.dat`**(tzdb 供 java.util/java.time 时区)
+   **+ `<bundle>/lib/libjimage.dylib`、`<bundle>/lib/libj2pkcs11.dylib`**
+   (0 字节 marker,见 §3 静态库协议)。
 
 JVM 参数(`jvm_bridge.mm`,当前实测值):`-Xrs -Djava.awt.headless=true
 -XX:+UseSerialGC -Xint -XX:+UnlockDiagnosticVMOptions -XX:-ImplicitNullChecks
@@ -233,6 +273,12 @@ JVM 参数(`jvm_bridge.mm`,当前实测值):`-Xrs -Djava.awt.headless=true
   竞争相关(修复"双份日志"后未再复现)。按决策**不保留任何强制
   退出**:宿主只发起 `System.exit(0)` 并观察,若超时未完成则报错
   提示"请上滑手动关闭应用",进程交给用户处理。
+- **java.time 时区两连修(本轮)**:① 缺 `tzdb.dat` → `ZoneInfoFile`
+  `NoClassDefFoundError`(打包修复,§3);② `ZoneRulesProvider` clinit 的
+  ServiceLoader 扫描 → Java 侧 jimage → `System.loadLibrary("jimage")`
+  `UnsatisfiedLinkError`。靠 Java 侧打印完整 cause 链定位到根因后,用
+  0 字节 marker 文件走通上游静态库协议(dlopen 被跳过),java.time
+  全链路恢复,详见 §3。
 - 诊断工具保留:`[zero-sig]`(每个 SIGSEGV 的 addr/pc 打 stderr,§3
   patch 5 内)、hs_err 于 app 沙盒 `tmp/`。
 

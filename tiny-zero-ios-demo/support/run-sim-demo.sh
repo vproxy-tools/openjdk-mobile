@@ -54,12 +54,12 @@ xcrun simctl terminate "$DEVICE" "$APP_ID" 2>/dev/null || true
 xcrun simctl uninstall "$DEVICE" "$APP_ID" 2>/dev/null || true
 xcrun simctl install "$DEVICE" "$APP"
 
-echo "==> launching (JVM bootstrap takes roughly 30-60s on the zero interpreter)"
+echo "==> launching (JVM bootstrap takes 1-4 min on the cold zero interpreter)"
 xcrun simctl launch "$DEVICE" "$APP_ID" -autostart "$PORT" -direct \
   | sed 's/^/    pid /'
 
 ok=""
-for i in $(seq 1 24); do
+for i in $(seq 1 40); do
   sleep 10
   if curl -sS -m 5 -o /dev/null http://127.0.0.1:"$PORT"/ 2>/dev/null; then
     ok=1; break
@@ -72,7 +72,7 @@ if [[ -n "$ok" ]]; then
   echo "=== HTTP response ==="
   curl -sS -m 5 -i "http://127.0.0.1:$PORT/" | head -12
 else
-  echo "ERROR: server did not come up within 240s" >&2
+  echo "ERROR: server did not come up within 400s" >&2
   C=$(xcrun simctl get_app_container "$DEVICE" "$APP_ID" data 2>/dev/null || true)
   [[ -n "$C" ]] && tail -20 "$C/Documents/java-console.log" 2>/dev/null || true
   exit 1

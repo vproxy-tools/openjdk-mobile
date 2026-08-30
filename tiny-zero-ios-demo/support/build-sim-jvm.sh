@@ -56,18 +56,12 @@ PY
 # Zero interpreter entry fallback: an invokevirtual target that has not been
 # linked reports from_interpreted_entry() == nullptr, which would crash the
 # call (SIGSEGV at a null entry point). Fall back to the interpreter entry
-# table, the same source Method::link_method uses. TEMP-DEBUG prints trace the
-# remaining unlinked-state crashes.
+# table, the same source Method::link_method uses.
 python3 - <<'PY'
 import sys
 path = "src/hotspot/cpu/zero/zeroInterpreter_zero.cpp"
 src = open(path).read()
-old = """    // Call the interpreter
-    if (JvmtiExport::can_post_interpreter_events()) {
-"""
-new = """    // Call the interpreter
-    if (JvmtiExport::can_post_interpreter_events()) {
-"""
+rewriter_include = '#include "interpreter/rewriter.hpp"\n'
 old2 = """    // Examine the message from the interpreter to decide what to do
     if (istate->msg() == BytecodeInterpreter::call_method) {
       Method* callee = istate->callee();
@@ -106,26 +100,15 @@ new3 = """  istate->set_bcp(method->is_native() ? nullptr : method->code_base())
     istate->set_constants(cpc);
   }
 """
-old4 = """#include "interpreter/rewriter.hpp"
-"""
-new4 = """#include "interpreter/rewriter.hpp"
-"""
-if old4 not in src:
-    # insert after the first interpreter include
-    anchor4 = """#include "interpreter/interpreter.hpp"
-"""
-    if anchor4 in src:
-        src = src.replace(anchor4, anchor4 + new4, 1)
-applied = 0
-if new in src and new2 in src and new3 in src and "#include \"interpreter/rewriter.hpp\"" in src:
+if new2 in src and new3 in src and rewriter_include in src:
     print("zero entry fallback patch already applied")
-elif old in src and old2 in src and old3 in src:
-    src = src.replace(old, new, 1).replace(old2, new2, 1).replace(old3, new3, 1)
-    anchor4 = """#include "interpreter/interpreter.hpp"
-"""
-    if anchor4 in src and "#include \"interpreter/rewriter.hpp\"" not in src:
-        src = src.replace(anchor4, anchor4 + """#include "interpreter/rewriter.hpp"
-""", 1)
+elif old2 in src and old3 in src:
+    src = src.replace(old2, new2, 1).replace(old3, new3, 1)
+    if rewriter_include not in src:
+        anchor = '#include "interpreter/interpreter.hpp"\n'
+        if anchor not in src:
+            sys.exit("cannot insert rewriter include; upstream shape changed")
+        src = src.replace(anchor, anchor + rewriter_include, 1)
     open(path, "w").write(src)
     print("zero entry fallback patch applied")
 else:
@@ -382,6 +365,36 @@ rm -rf "$RUNTIME_OUT"
 mkdir -p "$DEMO_ROOT/third_party/lib/lib"
 cp "$RUNTIME_OUT/lib/modules" "$DEMO_ROOT/third_party/lib/lib/modules"
 cp "$RUNTIME_OUT/release" "$DEMO_ROOT/third_party/lib/release"
+# java.time / java.util TimeZone need <java_home>/lib/tzdb.dat
+# (sun.util.calendar.ZoneInfoFile), which the three-module jlink image does
+# not carry; take it from the boot JDK like conf/.
+cp "$BOOT_JDK/lib/tzdb.dat" "$DEMO_ROOT/third_party/lib/lib/tzdb.dat"
+
+# Marker files for statically linked JDK-internal native libraries
+# (System.loadLibrary("jimage") & co). The marker's only job is to exist on
+# the system library path so NativeLibraries.findFromPaths hands the mapped
+# name to findBuiltinLib(); that native check strips the lib prefix/suffix
+# and looks up JNI_OnLoad_<name> in the process (RTLD_DEFAULT via the
+# os_posix patch + -export_dynamic; the symbol keeper anchors the
+# DEF_STATIC_JNI_OnLoad definition from the static archives). The builtin
+# path then skips dlopen entirely and uses the process handle — the upstream
+# statically-linked-library protocol, no JVM code changes needed.
+#
+# Audit of the shipped modules (java.base + jdk.unsupported +
+# jdk.crypto.cryptoki) — only System.loadLibrary throws on failure;
+# BootLoader.loadLibrary fails silently and the natives keep resolving via
+# process symbols (proven by the demo's ServerSocket/zip usage):
+#   jimage       System.loadLibrary, jimage reader   -> marker REQUIRED
+#   j2pkcs11     System.loadLibrary, SunPKCS11 use   -> marker REQUIRED
+#   net          BootLoader.loadLibrary (6 sites)    -> no marker (its
+#                JNI_OnLoad_net is UNDEFINED in the archive; a marker would
+#                fall into real dlopen of a 0-byte file and misfire)
+#   nio, zip     BootLoader.loadLibrary, silent      -> no marker needed
+#   osxsecurity  KeychainStore, lib not linked       -> not possible
+#   fallbackLinker (FFM) lib not built/linked        -> not possible; would
+#                only trigger if java.lang.foreign is used with fallback
+touch "$DEMO_ROOT/third_party/lib/libjimage.dylib" \
+      "$DEMO_ROOT/third_party/lib/libj2pkcs11.dylib"
 # java.home is <bundle>/lib; the runtime reads conf/security/java.security
 # etc. from <java_home>/conf. The three-module jlink image does not carry
 # them, so take the configuration set from the boot JDK.

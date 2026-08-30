@@ -95,6 +95,7 @@ struct ContentView: View {
         Text(text)
             .font(.footnote)
             .foregroundStyle(.white)
+            .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(10)
             .background(RoundedRectangle(cornerRadius: 8).fill(.red.opacity(0.85)))
