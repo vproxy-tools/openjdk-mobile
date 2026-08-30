@@ -31,8 +31,8 @@ tiny-zero-ios-demo/
 ├── support/
 │   ├── run-sim-demo.sh          # ★ 一键复现:构建→安装→启动→curl 验证(幂等)
 │   ├── build-sim-libffi.sh      # 交叉编译 iOS Simulator 版 libffi(首次,装到 ~/ios-sim-support)
-│   ├── build-sim-jvm.sh         # Zero variant 模拟器 JVM:6 个受控 patch +
-│   │                            #   jmod/jlink 产出 patched runtime image
+│   ├── build-sim-jvm.sh         # Zero variant 模拟器 JVM(修复已合入仓库)+
+│   │                            #   jmod/jlink 产出 runtime image
 │   └── build-java.sh            # Boot JDK javac → third_party/TinyHttpServer.jar
 ├── third_party/                 # 构建产物(gitignore,由脚本生成)
 ├── work-generated/              # sim jmod/jlink 中间产物(gitignore)
@@ -81,7 +81,7 @@ Content-Type: text/html; charset=utf-8
 ```bash
 cd tiny-zero-ios-demo
 ./support/build-sim-libffi.sh      # 首次:模拟器 libffi → ~/ios-sim-support(已装则秒过)
-./support/build-sim-jvm.sh         # Zero JVM(6 patch)+ jmod/jlink + conf/tzdb → third_party/
+./support/build-sim-jvm.sh         # Zero JVM(修复已合入仓库)+ jmod/jlink + conf/tzdb → third_party/
 ./support/build-java.sh            # → third_party/TinyHttpServer.jar
 xcodegen generate
 xcodebuild -project TinyHttpServer.xcodeproj -scheme TinyHttpServer \
@@ -131,12 +131,13 @@ tail -f "$(xcrun simctl get_app_container "iPhone 13" \
 xcrun simctl terminate "iPhone 13" com.wkgcass.TinyHttpServer
 ```
 
-## 3. 模拟器 JVM:Zero variant、6 个受控 patch 与 runtime image
+## 3. 模拟器 JVM:Zero variant、已合入仓库的修复与 runtime image
 
 模拟器使用 **Zero variant**(与真机 Tiny Zero 相同的解释器路径)。
-`build-sim-jvm.sh` 在源码树上应用 **6 个精确、幂等、失败即停的 source
-patch**(除 #3 外仅影响 `TARGET_OS_SIMULATOR`,对真机构建无行为影响),
-再产出静态库与 runtime image:
+以下 6 项修复**已直接合入本仓库**(git 历史是唯一事实来源;除 #3 外
+仅影响 `TARGET_OS_SIMULATOR`,对其他目标无行为影响),`build-sim-jvm.sh`
+只做存在性校验(缺失即 fail-fast 提示 bump `MOBILE_REF`),再产出静态库
+与 runtime image:
 
 1. **MAP_JIT**(`os_bsd.cpp`):`anon_mmap` 的 `__IOS__` 分支在模拟器下
    恢复 `MAP_JIT`——macOS 26 要求可执行映射必须是 MAP_JIT 的。
@@ -224,7 +225,7 @@ java.time 的 `ZoneRulesProvider` 初始化会经 boot loader 资源查找走到
 
 1. `-lz`(zlib)、`-framework CoreFoundation`(java.base locale/属性 native)
 2. **`-Wl,-export_dynamic`**(模拟器):把静态链接的 JNI 符号
-   (`Java_*`/`JVM_*`)放进动态符号表,配合 §3 patch 4 的 `RTLD_DEFAULT`
+   (`Java_*`/`JVM_*`)放进动态符号表,配合已合入的 `os_posix` 修复(`RTLD_DEFAULT`)
    查找;缺失会导致所有 native 解析落入 Java `ClassLoader.findNative`
    兜底并死锁(§6)。
 3. `Native/ios_wx_shims.mm`:`os::_jit_exec_enabled` 等三个符号的 weak
@@ -254,12 +255,12 @@ JVM 参数(`jvm_bridge.mm`,当前实测值):`-Xrs -Djava.awt.headless=true
   macOS two-level namespace 下**只搜索主可执行镜像**,而静态链接的 JNI
   符号位于链接进 app 的 dylib(debug.dylib)中——每个 native 解析都落到
   Java `ClassLoader.findNative` 兜底,在类初始化重入时拿到 null holder
-  而 NPE,异常构造相互触发直至引导期 GC。修复 = §3 patch 4(RTLD_DEFAULT)
+  而 NPE,异常构造相互触发直至引导期 GC。修复 = 已合入的 os_posix 修复(RTLD_DEFAULT)
   + `-export_dynamic` + `RegisterNatives`。
   (排障期间曾误判为"Zero 执行流错位";字节码级追踪证明
   `desiredAssertionStatus → Class.<clinit> → runtimeSetup →
   registerNatives → NativeLookup → findNative` 完全符合 Java 语义。)
-- **早期崩溃链(均以受控 patch 解决)**:CodeCache 无法保留(MAP_JIT)、
+- **早期崩溃链(均已合入仓库解决)**:CodeCache 无法保留(MAP_JIT)、
   MAP_JIT 写保护(lazy W^X)、未链接方法入口/常量池 cache(entry
   fallback + 按需 link_class)、pre-init 的 getStackTrace NPE(Throwable
   guard)。
@@ -279,8 +280,8 @@ JVM 参数(`jvm_bridge.mm`,当前实测值):`-Xrs -Djava.awt.headless=true
   `UnsatisfiedLinkError`。靠 Java 侧打印完整 cause 链定位到根因后,用
   0 字节 marker 文件走通上游静态库协议(dlopen 被跳过),java.time
   全链路恢复,详见 §3。
-- 诊断工具保留:`[zero-sig]`(每个 SIGSEGV 的 addr/pc 打 stderr,§3
-  patch 5 内)、hs_err 于 app 沙盒 `tmp/`。
+- 诊断工具保留:`[zero-sig]`(每个 SIGSEGV 的 addr/pc 打 stderr,位于
+  已合入的 signals_posix 修复内)、hs_err 于 app 沙盒 `tmp/`。
 
 ## 7. 已知限制
 

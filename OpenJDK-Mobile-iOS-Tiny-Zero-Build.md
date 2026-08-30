@@ -114,7 +114,6 @@ dist/device/
     ├── native-input-libs.txt
     ├── native-keep-symbols.txt
     ├── symbol_keeper.cpp
-    ├── tiny-jni-anchor.patch
     ├── libjvm-pass2.defined.nm.txt
     ├── libjvm-pass2.undefined.nm.txt
     ├── libtinyjvm.members.txt
@@ -533,9 +532,15 @@ JNI_CreateJavaVM
 
 ---
 
-## 12. `jni.cpp` 锚点 patch 如何稳定维护
+## 12. `jni.cpp` 锚点如何稳定维护
 
-本方案不维护一份容易错位的大型长期 diff，而是在 checkout 完指定 commit 后由 `10-fetch.sh` 做一个**精确、失败即停**的 source transform：
+> 更新（2026-08-30）：锚点改动（以及 `OPT_SPEED_SRC` 置空与全部模拟器/
+> 嵌入修复）已**直接合入本仓库**，`10-fetch.sh` 不再做 source transform，
+> 也不再生成/存档 `.patch` 文件；git 历史是唯一事实来源，上游形态变化在
+> merge 时显式冲突，`10-fetch.sh` 只做存在性校验（缺失即失败并提示升级
+> `MOBILE_REF`）。以下历史方案描述保留作背景。
+
+原方案不维护一份容易错位的大型长期 diff，而是在 checkout 完指定 commit 后由 `10-fetch.sh` 做一个**精确、失败即停**的 source transform：
 
 - 在 `#include "jni.h"` 后声明：
 
@@ -1276,8 +1281,6 @@ work/logs/mobile-commit.txt
 work/generated/native-keeper-input-libs.txt
 work/generated/native-keep-symbols.txt
 work/generated/symbol_keeper.cpp
-work/generated/symbol_keeper.patch
-work/generated/tiny-jni-anchor.patch
 work/generated/libjvm-pass2.defined.nm.txt
 work/generated/libjvm-pass2.undefined.nm.txt
 work/generated/*.jmod.describe.txt

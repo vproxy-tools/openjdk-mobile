@@ -115,7 +115,7 @@ dist/device/                     # canonical deliverable
 ├── include/                     # jni.h、jni_md.h、classfile_constants.h、ios/
 ├── runtime/lib/modules          # 三模块 jimage
 ├── runtime/release
-└── meta/                        # 环境记录、keeper 源码与符号表、全部 patch、SHA256SUMS
+└── meta/                        # 环境记录、keeper 源码与符号表、SHA256SUMS
 
 dist/tiny-openjdk-ios-device.tar.gz(.sha256)
 ```
@@ -137,24 +137,30 @@ cd .. && shasum -a 256 -c tiny-openjdk-ios-device.tar.gz.sha256
 `JNI_CreateJavaVM` 调用、PKCS#11 初始化、TCP/NIO/TLS、内存上限（`-Xmx`）等
 任何运行时测试。这些属于后续 Runtime Validation 阶段。
 
-### 4.2 对 upstream 源码的受控修改
+### 4.2 源码修改已合入仓库（不再有 source transform）
 
-`10-fetch.sh` 在 checkout 后施加三个**精确匹配、失败即停**的 source
-transform，实际 diff 全部存档于 `dist/device/meta/`：
+历史版本由 `10-fetch.sh` 在 checkout 后施加 source transform，并把 diff
+存档到 `dist/device/meta/*.patch`。这些改动现已**全部直接合入本仓库**
+（git 历史是唯一事实来源，上游形态变化会在 merge 时显式冲突），
+`10-fetch.sh` 只做**存在性校验**：`MOBILE_REF` 早于合入 commit 时直接
+失败并提示升级，绝不静默构建一个未修复的树。合入内容：
 
 1. `src/hotspot/share/prims/jni.cpp`：`JNI_CreateJavaVM` 入口调用一次
-   `tiny_symbol_keeper_anchor()`（keeper 自锚定，App 无需 `-all_load`/`-force_load`）。
-   diff 见 `meta/tiny-jni-anchor.patch`。
+   `tiny_symbol_keeper_anchor()`（keeper 自锚定，App 无需 `-all_load`/`-force_load`；
+   形态契约由 `50-build-pass2.sh` 的 defined/undefined 符号校验把关）。
 2. `make/hotspot/lib/JvmFeatures.gmk`：`OPT_SPEED_SRC` 置空。opt-size 下
    upstream 会把一批文件提升为 `-O3`，与 `-Os` 编译的预编译头
    （`__OPTIMIZE_SIZE__` 宏）冲突；Tiny Zero 尺寸优先，统一 `-Os`。
-   iOS Zero 默认会过滤 opt-size，该组合为本项目新启用。
-   diff 见 `meta/tiny-opt-size-pch.patch`。
-3. `src/hotspot/os/bsd/symbol_keeper.cpp`：Pass-1 为 stub，Pass-2 由实际
-   静态库符号（`Java_*`/`JNI_OnLoad*`/`JIMAGE_*`/`JDK_*`）自动生成。
-   源码见 `meta/symbol_keeper.cpp`。
+   仅影响开启 opt-size 特性的构建。iOS Zero 默认会过滤 opt-size，
+   该组合为本项目新启用。
+3. 模拟器/静态嵌入修复（sim MAP_JIT、zero 解释器入口回退与按需链接、
+   Throwable pre-init 守卫、静态链接 `RTLD_DEFAULT` native 查找、
+   bsd_zero 崩溃 pc、信号处理器 lazy W^X）：见各 commit 说明与
+   `tiny-zero-ios-demo/README.md` §3/§6。
 
-upstream 改动这些文件形态时脚本直接失败，不会猜测新插入位置。
+`src/hotspot/os/bsd/symbol_keeper.cpp` 仍为**构建期生成物**（Pass-1 为
+stub，Pass-2 由实际静态库符号 `Java_*`/`JNI_OnLoad*`/`JIMAGE_*`/`JDK_*`
+自动生成），源码归档于 `meta/symbol_keeper.cpp`，不进入 git。
 
 ### 4.3 工具链适配（与设计文档 §16 的差异）
 

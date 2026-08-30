@@ -103,6 +103,5 @@ count="$(wc -l < "$SYMBOLS" | tr -d ' ')"
 } > "$KEEPER"
 
 cp "$KEEPER" "$GEN_DIR/symbol_keeper.cpp"
-git -C "$SRC_DIR" diff -- src/hotspot/os/bsd/symbol_keeper.cpp > "$GEN_DIR/symbol_keeper.patch" || true
 
 echo "Generated symbol keeper with $count symbols"

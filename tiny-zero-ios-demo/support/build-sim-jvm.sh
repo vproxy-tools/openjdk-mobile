@@ -3,10 +3,11 @@ set -euo pipefail
 
 # Build a Zero JVM static library for the iOS Simulator (arm64).
 #
-# Reuses the source tree prepared by tiny-zero-ios-build (same pinned commit,
-# same jni.cpp keeper anchor and the same generated symbol_keeper.cpp), so the
-# simulator slice behaves like the device slice. The runtime image
-# (lib/modules) is platform independent and is taken from the device build.
+# Reuses the source tree prepared by tiny-zero-ios-build (same pinned commit
+# and the same generated symbol_keeper.cpp), so the simulator slice behaves
+# like the device slice. All port fixes are merged into the repository (see
+# the presence check below). The runtime image (lib/modules) is platform
+# independent and is taken from the device build.
 
 DEMO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TINY_ROOT="${TINY_ROOT:-$DEMO_ROOT/../tiny-zero-ios-build}"
@@ -23,249 +24,27 @@ SIMFFI="$HOME/ios-sim-support/libffi"
 
 cd "$SRC"
 
-# The simulator process runs under macOS memory rules: an RWX mprotect is
-# only allowed on MAP_JIT mappings. Upstream's __IOS__ branch of anon_mmap
-# deliberately drops MAP_JIT (real-device rules), which makes the Zero code
-# cache commit fail with "Could not reserve enough space in CodeCache".
-# Re-enable MAP_JIT for simulator targets only (TARGET_OS_SIMULATOR is 0 in
-# device builds, so this patch is inert there).
-python3 - <<'PY'
-import sys
-path = "src/hotspot/os/bsd/os_bsd.cpp"
-src = open(path).read()
-old = """  const int flags = MAP_PRIVATE | MAP_NORESERVE | MAP_ANONYMOUS
-#ifdef __IOS__
-      ;
-"""
-new = """  const int flags = MAP_PRIVATE | MAP_NORESERVE | MAP_ANONYMOUS
-#ifdef __IOS__
-#if defined(TARGET_OS_SIMULATOR) && TARGET_OS_SIMULATOR
-      | (exec ? MAP_JIT : 0) // simulator runs under macOS RWX rules
-#endif
-      ;
-"""
-if new in src:
-    print("MAP_JIT patch already applied")
-elif old in src:
-    open(path, "w").write(src.replace(old, new, 1))
-    print("MAP_JIT patch applied")
-else:
-    sys.exit("cannot apply MAP_JIT patch; upstream os_bsd.cpp shape changed")
-PY
-
-# Zero interpreter entry fallback: an invokevirtual target that has not been
-# linked reports from_interpreted_entry() == nullptr, which would crash the
-# call (SIGSEGV at a null entry point). Fall back to the interpreter entry
-# table, the same source Method::link_method uses.
-python3 - <<'PY'
-import sys
-path = "src/hotspot/cpu/zero/zeroInterpreter_zero.cpp"
-src = open(path).read()
-rewriter_include = '#include "interpreter/rewriter.hpp"\n'
-old2 = """    // Examine the message from the interpreter to decide what to do
-    if (istate->msg() == BytecodeInterpreter::call_method) {
-      Method* callee = istate->callee();
-
-      // Trim back the stack to put the parameters at the top
-      stack->set_sp(istate->stack() + 1);
-"""
-new2 = """    // Examine the message from the interpreter to decide what to do
-    if (istate->msg() == BytecodeInterpreter::call_method) {
-      Method* callee = istate->callee();
-
-      // TINY-ZERO FIX: an invokevirtual target that has not been linked yet
-      // reports from_interpreted_entry() == nullptr; fall back to the
-      // interpreter entry table, the same source Method::link_method uses.
-      if (istate->callee_entry_point() == nullptr && callee != nullptr) {
-        istate->set_callee_entry_point(
-            AbstractInterpreter::entry_for_method(methodHandle(thread, callee)));
-      }
-
-      // Trim back the stack to put the parameters at the top
-      stack->set_sp(istate->stack() + 1);
-"""
-old3 = """  istate->set_bcp(method->is_native() ? nullptr : method->code_base());
-  istate->set_constants(method->constants()->cache());
-"""
-new3 = """  istate->set_bcp(method->is_native() ? nullptr : method->code_base());
-  // TINY-ZERO FIX: a klass that has not been rewritten/linked yet (early
-  // bootstrap on this port) has no constant pool cache, which the zero
-  // interpreter dereferences immediately; run the rewriter on demand.
-  {
-    ConstantPoolCache* cpc = method->constants()->cache();
-    if (cpc == nullptr) {
-      method->method_holder()->link_class(thread);
-      cpc = method->constants()->cache();
-    }
-    istate->set_constants(cpc);
+# The simulator port fixes (MAP_JIT for exec mappings, zero interpreter
+# entry fallback + on-demand linking, the Throwable pre-init guard,
+# RTLD_DEFAULT native lookup for static links, bsd_zero crash pc, lazy W^X
+# in the signal handler) are merged into this repository - git history is
+# the single source of truth, nothing is patched here anymore. Verify the
+# tree actually contains them and fail fast with a concrete remedy.
+while read -r marker file; do
+  [[ -n "$marker" ]] || continue
+  grep -q "$marker" "$SRC/$file" || {
+    echo "ERROR: $SRC/$file lacks '$marker' - tree predates the merged port fixes." >&2
+    echo "       Re-run tiny-zero-ios-build/build.sh (fetches MOBILE_REF from config/build.env)." >&2
+    exit 1
   }
-"""
-if new2 in src and new3 in src and rewriter_include in src:
-    print("zero entry fallback patch already applied")
-elif old2 in src and old3 in src:
-    src = src.replace(old2, new2, 1).replace(old3, new3, 1)
-    if rewriter_include not in src:
-        anchor = '#include "interpreter/interpreter.hpp"\n'
-        if anchor not in src:
-            sys.exit("cannot insert rewriter include; upstream shape changed")
-        src = src.replace(anchor, anchor + rewriter_include, 1)
-    open(path, "w").write(src)
-    print("zero entry fallback patch applied")
-else:
-    sys.exit("cannot apply zero entry fallback patch; upstream shape changed")
-PY
-
-# Throwable stack-trace guard: during the pre-init window the zero port's
-# stack machinery cannot materialize elements (StackTraceElement.of returns
-# null on a half-built backtrace), which turns getStackTrace() into an NPE
-# and cascades into a NoClassDefFoundError construction storm. Return an
-# empty trace until the VM is booted.
-python3 - <<'PY'
-import sys
-path = "src/java.base/share/classes/java/lang/Throwable.java"
-src = open(path).read()
-old = """    private synchronized StackTraceElement[] getOurStackTrace() {
-        // Initialize stack trace field with information from
-        // backtrace if this is the first call to this method
-        if (stackTrace == UNASSIGNED_STACK || stackTrace == null) {
-"""
-new = """    private synchronized StackTraceElement[] getOurStackTrace() {
-        // TINY-ZERO FIX (simulator): before the VM is booted the stack
-        // machinery cannot materialize elements yet; an empty trace keeps
-        // bootstrap-time exception handling usable.
-        if (!jdk.internal.misc.VM.isBooted()) {
-            return UNASSIGNED_STACK;
-        }
-        // Initialize stack trace field with information from
-        // backtrace if this is the first call to this method
-        if (stackTrace == UNASSIGNED_STACK || stackTrace == null) {
-"""
-if new in src:
-    print("Throwable guard patch already applied")
-elif old in src:
-    open(path, "w").write(src.replace(old, new, 1))
-    print("Throwable guard patch applied")
-else:
-    sys.exit("cannot apply Throwable guard patch; upstream shape changed")
-PY
-
-# Native lookup handle: a statically linked iOS binary's JNI symbols may
-# live in any linked image (debug dylib etc.); RTLD_FIRST restricts dlsym to
-# the main executable and misses them, sending every native resolution to
-# ClassLoader.findNative and deadlocking bootstrap in initialization
-# reentry. Use RTLD_DEFAULT for static links.
-python3 - <<'PY'
-import sys
-path = "src/hotspot/os/posix/os_posix.cpp"
-src = open(path).read()
-old = """void* os::get_default_process_handle() {
-#ifdef __APPLE__
-"""
-new = """void* os::get_default_process_handle() {
-#if defined(__APPLE__) && defined(__IOS__)
-  // TINY-ZERO FIX: see build-sim-jvm.sh; search the global namespace for
-  // statically linked builds so JNI symbols in any image are found.
-  if (is_vm_statically_linked()) {
-    return (void*)-2 /* RTLD_DEFAULT */;
-  }
-#endif
-#ifdef __APPLE__
-"""
-if new in src:
-    print("native handle patch already applied")
-elif old in src:
-    open(path, "w").write(src.replace(old, new, 1))
-    print("native handle patch applied")
-else:
-    sys.exit("cannot apply native handle patch; upstream shape changed")
-PY
-
-# bsd_zero crash reporting: ucontext_get_pc used ShouldNotCallThis, so any
-# error-reporting path that needs the faulting pc turned into a second fatal
-# ("Native frames: unavailable"). Return the real pc (darwin arm64 layout),
-# mirroring what linux_zero provides behind DecodeErrorContext — but
-# unconditionally, since this is only called on the crash path.
-python3 - <<'PY'
-import sys
-path = "src/hotspot/os_cpu/bsd_zero/os_bsd_zero.cpp"
-src = open(path).read()
-old = """address os::Posix::ucontext_get_pc(const ucontext_t* uc) {
-  ShouldNotCallThis();
-  return nullptr;
-}
-"""
-new = """address os::Posix::ucontext_get_pc(const ucontext_t* uc) {
-  // TINY-ZERO FIX: crash-path only; return the real pc so hs_err can print
-  // native frames instead of hitting ShouldNotCallThis during reporting.
-#if defined(AARCH64) && defined(__APPLE__)
-  return (address)uc->uc_mcontext->__ss.__pc;
-#else
-  ShouldNotCallThis();
-  return nullptr;
-#endif
-}
-"""
-if new in src:
-    print("bsd_zero pc patch already applied")
-elif old in src:
-    open(path, "w").write(src.replace(old, new, 1))
-    print("bsd_zero pc patch applied")
-else:
-    sys.exit("cannot apply bsd_zero pc patch; upstream shape changed")
-PY
-
-# Lazy W^X trampoline for the simulator: macOS 26 MAP_JIT pages are strictly
-# either writable or executable, and the iOS build compiles out the upstream
-# W^X healing (MACOS_AARCH64 is not defined for iOS targets). A BUS_ADRALN
-# fault with si_addr == pc means "needs execute", otherwise "needs write";
-# flip the per-thread protection and let the kernel retry the faulting
-# instruction.
-python3 - <<'PY'
-import sys
-path = "src/hotspot/os/posix/signals_posix.cpp"
-src = open(path).read()
-old = """static void javaSignalHandler(int sig, siginfo_t* info, void* context) {
-  // Do not add any code here!
-"""
-new = """// Resolved through dlsym: the SDK headers mark pthread_jit_write_protect_np
-// unavailable on iOS, but it exists in the simulator runtime. The file-scope
-// initializer runs at library load time, before any signal can arrive.
-extern "C" void* dlsym(void*, const char*);
-static void (*const lazy_wx_flip)(int) =
-    (void (*)(int))dlsym((void*)-2 /* RTLD_DEFAULT */, "pthread_jit_write_protect_np");
-
-static void javaSignalHandler(int sig, siginfo_t* info, void* context) {
-#if defined(__APPLE__) && defined(__aarch64__) && \\
-    defined(TARGET_OS_SIMULATOR) && TARGET_OS_SIMULATOR
-  // bsd_zero cannot recover from SIGSEGV in the interpreter (its signal path
-  // is unfinished upstream); at least make the fault site visible.
-  if (sig == SIGSEGV && info != nullptr && context != nullptr) {
-    ucontext_t* uc0 = (ucontext_t*)context;
-    ::fprintf(stderr, "[zero-sig] SIGSEGV addr=%p pc=%p\\n",
-              info->si_addr, (void*)uc0->uc_mcontext->__ss.__pc);
-  }
-  if (sig == SIGBUS && info != nullptr && info->si_code == BUS_ADRALN
-      && context != nullptr && lazy_wx_flip != nullptr) {
-    ucontext_t* uc = (ucontext_t*)context;
-    uintptr_t pc = (uintptr_t)uc->uc_mcontext->__ss.__pc;
-    if ((uintptr_t)info->si_addr == pc) {
-      lazy_wx_flip(1); // executing a write-protected page
-    } else {
-      lazy_wx_flip(0); // writing an exec-protected page
-    }
-    return;
-  }
-#endif
-  // Do not add any code here!
-"""
-if new in src:
-    print("lazy W^X patch already applied")
-elif old in src:
-    open(path, "w").write(src.replace(old, new, 1))
-    print("lazy W^X patch applied")
-else:
-    sys.exit("cannot apply lazy W^X patch; upstream signals_posix.cpp shape changed")
-PY
+done <<'MARKERS'
+MAP_JIT src/hotspot/os/bsd/os_bsd.cpp
+set_callee_entry_point src/hotspot/cpu/zero/zeroInterpreter_zero.cpp
+VM.isBooted src/java.base/share/classes/java/lang/Throwable.java
+RTLD_DEFAULT src/hotspot/os/posix/os_posix.cpp
+ucontext_get_pc src/hotspot/os_cpu/bsd_zero/os_bsd_zero.cpp
+lazy_wx_flip src/hotspot/os/posix/signals_posix.cpp
+MARKERS
 
 # Invalidate the configuration if it points at an SDK that no longer exists
 # (e.g. after a macOS/Xcode upgrade), was produced by another clang, or
