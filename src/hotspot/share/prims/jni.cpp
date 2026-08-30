@@ -42,6 +42,7 @@
 #include "gc/shared/stringdedup/stringDedup.hpp"
 #include "interpreter/linkResolver.hpp"
 #include "jni.h"
+extern "C" void tiny_symbol_keeper_anchor();
 #include "jvm.h"
 #include "logging/log.hpp"
 #include "memory/allocation.inline.hpp"
@@ -3705,6 +3706,7 @@ static jint JNI_CreateJavaVM_inner(JavaVM **vm, void **penv, void *args) {
 }
 
 _JNI_IMPORT_OR_EXPORT_ jint JNICALL JNI_CreateJavaVM(JavaVM **vm, void **penv, void *args) {
+  tiny_symbol_keeper_anchor();
   jint result = JNI_ERR;
   // On Windows, let CreateJavaVM run with SEH protection
 #if defined(_WIN32) && !defined(USE_VECTORED_EXCEPTION_HANDLING)
