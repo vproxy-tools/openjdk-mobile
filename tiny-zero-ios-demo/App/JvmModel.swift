@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import UIKit
 
 /// App-wide observable state: JVM lifecycle, persisted log/status, the
 /// 30-day background progress and the error surfaced to the UI.
@@ -132,9 +133,12 @@ final class JvmModel {
     private var documents: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
     }
-    /// The app's data container root: passed as -Duser.home, so vproxy puts
-    /// all of its state (including .vproxy/) inside the sandbox.
-    private var containerDir: URL { documents.deletingLastPathComponent() }
+    /// Passed as -Duser.home, so vproxy puts all of its state (including
+    /// .vproxy/) inside the sandbox. Must be a directory that is writable on
+    /// real devices: the data container root itself is read-only there
+    /// (mkdir <container>/.vproxy failed with EPERM on the first device
+    /// run), while Documents/ is writable on both device and simulator.
+    private var userHomeDir: URL { documents }
     private var logFile: URL { documents.appendingPathComponent("java-console.log") }
     private var stateFile: URL { documents.appendingPathComponent("java-state.json") }
 
@@ -143,6 +147,14 @@ final class JvmModel {
     init() {
         backgroundMode = backgroundExecution.displayName
         restoreFromDisk()
+        // Wire the background-execution handlers before the UI exists: the
+        // system may relaunch the app in the background for a submitted
+        // continued-processing task, and the launch handler then starts the
+        // JVM without any user interaction.
+        wireBackgroundHandlers()
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.detectBackgroundSuspension() }
     }
 
     private func restoreFromDisk() {
@@ -225,29 +237,57 @@ final class JvmModel {
             return
         }
 
-        // The JVM is started from the background task's launch callback
-        // (BGContinuedProcessingTask on iOS 26), so the program genuinely
-        // runs as a continued processing task, not as a foreground thread.
+        // Continued processing semantics (iOS 26 SDK): the workload begins
+        // immediately after a successful submit and the system adopts it via
+        // the launch handler — seconds later, when backgrounded, or after a
+        // process relaunch (from which the handler starts the JVM headless).
         // There is deliberately no degradation: a failed submit is reported
         // and the JVM is not started.
-        guard backgroundExecution.begin(onLaunch: { [weak self] in
-            DispatchQueue.main.async { self?.launchJVM() }
-        }, onExpire: { [weak self] in
-            DispatchQueue.main.async { self?.handleBackgroundExpired() }
-        }, onFail: { [weak self] message in
-            DispatchQueue.main.async {
-                guard let self, self.phase == .starting else { return }
-                self.phase = .idle
-                self.errorMessage = "后台任务失败:\(message)\(self.backgroundFailureHint)"
-                self.appendLog("[app] 后台任务失败:\(message)")
-                self.persistState(exitReason: self.errorMessage)
-            }
-        }) else {
+        wireBackgroundHandlers()
+        guard backgroundExecution.begin() else {
             phase = .idle
             errorMessage = (backgroundExecution.lastError ?? "系统拒绝了后台执行申请,未启动 JVM")
                 + backgroundFailureHint
             appendLog("[app] \(errorMessage!)")
             return
+        }
+    }
+
+    private func wireBackgroundHandlers() {
+        backgroundExecution.setHandlers(
+            onLaunch: { [weak self] in
+                DispatchQueue.main.async { self?.onBackgroundLaunch() }
+            },
+            onExpire: { [weak self] in
+                DispatchQueue.main.async { self?.handleBackgroundExpired() }
+            })
+    }
+
+    /// The workload may begin: right after a successful submit (normal
+    /// flow, phase already .starting) or from the launch handler of a
+    /// system-relaunched process (phase idle, headless continuation).
+    private func onBackgroundLaunch() {
+        if phase == .idle {
+            appendLog("=== continued processing 后台重启进程,继续工作负载 ===")
+            errorMessage = nil
+            phase = .starting
+            persistState()
+        }
+        launchJVM()
+    }
+
+    /// Returning to the foreground without an adopted task: if wall-clock
+    /// time ran ahead of the live tick counter, the process was suspended
+    /// during the background stay — report it instead of pretending the
+    /// background window held.
+    private func detectBackgroundSuspension() {
+        guard phase == .running, useBackgroundTask, !backgroundExecution.isClaimed,
+              let startedAt else { return }
+        let gap = Date().timeIntervalSince(startedAt) - elapsedSeconds
+        if gap > 90 {
+            errorMessage = "后台期间进程被挂起约 \(Int(gap)) 秒(continued processing 未接管);进程恢复,JVM 线程继续"
+            appendLog("[app] \(errorMessage!)")
+            persistState()
         }
     }
 
@@ -278,7 +318,7 @@ final class JvmModel {
         }
 
         let jarPaths = "\(vproxyJar):\(bootstrapJar)"
-        let rc = tinyvm_start(libDir, jarPaths, containerDir.path,
+        let rc = tinyvm_start(libDir, jarPaths, userHomeDir.path,
                               { JvmModel.shared.handleLogLine($0) },
                               { JvmModel.shared.handleExit($0, $1) })
         if rc != 0 {
@@ -354,9 +394,9 @@ final class JvmModel {
 
     private func handleBackgroundExpired() {
         guard phase == .running || phase == .starting else { return }
-        appendLog("[app] 后台任务到期,系统即将挂起进程(JVM 将暂停)")
-        errorMessage = "后台任务到期:系统挂起了进程"
-        persistState(exitReason: "后台任务到期,进程被挂起")
+        appendLog("[app] 后台任务被系统收回(expiration),任务已收尾;进程随后会被挂起,JVM 线程暂停")
+        errorMessage = "后台任务被系统收回:任务已正常收尾,进程被挂起(回前台后 JVM 继续)"
+        persistState(exitReason: "后台任务被系统收回,进程被挂起")
         // The JVM thread itself keeps its state; the process is merely
         // suspended. Do not mark it as exited.
     }
@@ -425,7 +465,7 @@ final class JvmModel {
             phase: phase,
             startedAt: startedAt,
             lastLogAt: Date(),
-            backgroundMode: backgroundExecution.displayName,
+            backgroundMode: backgroundMode,
             exitReason: exitReason)
         ioQueue.async { [stateFile, state] in
             if let data = try? JSONEncoder().encode(state) {

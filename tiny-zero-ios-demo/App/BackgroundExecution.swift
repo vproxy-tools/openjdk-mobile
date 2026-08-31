@@ -8,13 +8,20 @@ import UIKit
 /// Two implementations:
 ///
 /// 1. `ContinuedProcessingBackgroundExecution` (iOS 26+): the native
-///    `BGContinuedProcessingTask` API — no reflection and **no silent
-///    degradation**: `begin()` submits a `BGContinuedProcessingTaskRequest`
-///    and the JVM is started from the task's launch handler. If the submit
-///    fails, or the launch handler is not run within the grant window, the
-///    failure is reported verbatim (`lastError` / `onFail`) and the JVM is
-///    not started. The granted window is presented as 30 days and reported
-///    through `NSProgress` (the task conforms to `NSProgressReporting`).
+///    `BGContinuedProcessingTask` API. Per the SDK contract the request
+///    "begins a workload immediately, or shortly after submission" — the
+///    intended pattern is that the workload starts right away (foreground)
+///    and the system *adopts* it: the launch handler may fire seconds after
+///    the submit, when the app is backgrounded, or after a system relaunch
+///    of a killed process. `begin()` therefore starts the work as soon as
+///    the submit is accepted; the handler only attaches the task lifecycle
+///    (expiration handler + 30-day NSProgress) or, in a relaunched process,
+///    starts the work headless. The submit uses strategy `.fail` — the
+///    system either commits to running the task now or throws on the spot
+///    (e.g. `immediateRunIneligible` under load) — and there is **no silent
+///    degradation**: a failed submit is reported verbatim and the JVM is
+///    not started. Non-adoption while backgrounded is detected by JvmModel
+///    when the app becomes active again.
 ///
 /// 2. `FallbackBackgroundExecution`: `UIApplication.beginBackgroundTask`,
 ///    used below iOS 26 where the continued processing API does not exist.
@@ -23,35 +30,54 @@ protocol BackgroundExecution: AnyObject {
     var displayName: String { get }
 
     /// Failure description of the last `begin()` attempt (submit rejected,
-    /// launch handler never fired, ...). Nil when the claim succeeded.
+    /// background task denied, ...). Nil when the claim succeeded.
     var lastError: String? { get }
 
-    /// Starts claiming background runtime. Returns false if the system
-    /// denied it (see `lastError`). `onLaunch` is invoked exactly once when
-    /// the real work may start (from the BGContinuedProcessingTask launch
-    /// handler, or immediately below iOS 26). `onExpire` is called when the
-    /// granted window ends. `onFail` is called when a submitted task is
-    /// later rejected (launch handler never fired).
-    func begin(onLaunch: @escaping () -> Void,
-               onExpire: @escaping () -> Void,
-               onFail: @escaping (String) -> Void) -> Bool
+    /// True while a granted system task keeps the process runnable in the
+    /// background (adopted continued processing task / active background
+    /// task assertion).
+    var isClaimed: Bool { get }
 
-    /// Ends the claim (normal stop).
+    /// Installs the lifecycle callbacks. Called once at model init — so a
+    /// system relaunch that fires the launch handler before any UI action
+    /// still starts the JVM — and again on every user start.
+    /// `onLaunch` is invoked exactly once per claim when the real work may
+    /// begin: right after a successful submit (continued processing starts
+    /// the workload in the foreground), or in a relaunched process from the
+    /// launch handler. `onExpire` is called when the granted window ends.
+    func setHandlers(onLaunch: @escaping () -> Void,
+                     onExpire: @escaping () -> Void)
+
+    /// Starts claiming background runtime and begins the work (via
+    /// `onLaunch`). Returns false if the system denied it (see
+    /// `lastError`); the JVM is then not started.
+    func begin() -> Bool
+
+    /// Ends the claim (normal stop or JVM exit); also cancels a still
+    /// pending submission so the system does not fire the handler for work
+    /// that no longer exists.
     func end()
 }
 
 // MARK: - iOS 26 continued processing (native API)
 
-/// Task identifier, also advertised in Info.plist
-/// (BGTaskSchedulerPermittedIdentifiers). iOS 26.5 rejects the wildcard
-/// notation suggested by the SDK headers ("Invalid identifier form for
-/// Continued Processing Task"), so a fixed concrete identifier is used.
-private let continuedIdentifier = "com.wkgcass.tinyhttpserver.continued.demo"
-
-/// How long to wait for the launch handler after a successful submit before
-/// reporting failure. On a real device the handler fires immediately while
-/// the app is foregrounded.
-private let launchGrantTimeout: TimeInterval = 10
+/// Identifier scheme for continued processing, derived empirically from the
+/// three checks iOS 26.5 actually performs (each mismatch below was
+/// observed):
+///   1. Info.plist BGTaskSchedulerPermittedIdentifiers: a concrete
+///      identifier matches a wildcard entry (glob), but submitting the
+///      wildcard itself is "Unrecognized Identifier" (BGTaskSchedulerError
+///      code 3). The plist lists BOTH the wildcard and the concrete id.
+///   2. submit() requires the request identifier to EQUAL a registered
+///      identifier — a concrete submit against a wildcard registration is
+///      an NSAssertion crash (_handleSubmissionWithoutRegistration...).
+///      register() and submit() therefore both use the concrete id.
+///   3. Dispatch additionally requires the identifier prefix to contain the
+///      exact, case sensitive bundle ID (SDK header); an all-lowercase id
+///      passes submit but the task is never dispatched to the handler
+///      (second real-device run: submit OK, handler silent).
+private let continuedIdentifierPattern = "com.wkgcass.TinyHttpServer.continuedProcessing.*"
+private let continuedIdentifier = "com.wkgcass.TinyHttpServer.continuedProcessing.demo"
 
 /// Must be called from `application(_:didFinishLaunchingWithOptions:)`
 /// before the app finishes launching; registering twice for the same
@@ -74,42 +100,50 @@ final class ContinuedProcessingBackgroundExecution: BackgroundExecution {
     private var task: BGContinuedProcessingTask?
     private var onLaunch: (() -> Void)?
     private var onExpire: (() -> Void)?
-    private var onFail: ((String) -> Void)?
-    private var launchGrantTimer: Timer?
+    /// Guards the single onLaunch delivery across the normal flow (submit
+    /// success) and the system-relaunch flow (launch handler first).
+    private var launchDelivered = false
 
     private init() {}
 
-    func begin(onLaunch: @escaping () -> Void,
-               onExpire: @escaping () -> Void,
-               onFail: @escaping (String) -> Void) -> Bool {
+    var isClaimed: Bool { task != nil }
+
+    func setHandlers(onLaunch: @escaping () -> Void,
+                     onExpire: @escaping () -> Void) {
         self.onLaunch = onLaunch
         self.onExpire = onExpire
-        self.onFail = onFail
+    }
+
+    func begin() -> Bool {
         lastError = nil
+        launchDelivered = false
 
         // Submitting a new request with the same id replaces the queued one.
+        // Strategy .fail (SDK semantics, iOS 26): either the system commits
+        // to running the task now or the submit throws immediately. The
+        // .queue strategy parks the request at the back of a system queue
+        // under load: submit "succeeds" but the task never starts.
         let request = BGContinuedProcessingTaskRequest(
             identifier: continuedIdentifier,
             title: "Tiny Zero HTTP Server",
             subtitle: "嵌入式 JVM 后台服务")
-        request.strategy = .queue
+        request.strategy = .fail
 
         do {
             try BGTaskScheduler.shared.submit(request)
         } catch {
             // No degradation: report the raw system error and refuse to run.
-            lastError = "BGContinuedProcessingTask submit 失败:\(error)"
+            lastError = "BGContinuedProcessingTask submit 失败:\(Self.describeSubmitError(error))"
             displayName = "BGContinuedProcessingTask 提交失败"
             return false
         }
 
-        displayName = "BGContinuedProcessingTask(已提交,等待系统授予)"
-        launchGrantTimer = Timer.scheduledTimer(withTimeInterval: launchGrantTimeout, repeats: false) { [weak self] _ in
-            guard let self, self.task == nil else { return }
-            self.lastError = "launchHandler \(Int(launchGrantTimeout)) 秒内未触发(系统未授予 continued processing)"
-            self.displayName = "BGContinuedProcessingTask 未授予"
-            self.onFail?(self.lastError!)
-        }
+        // The workload begins now, in the foreground; the launch handler
+        // attaches the task lifecycle whenever the system adopts the work
+        // (seconds later, on backgrounding, or after a process relaunch).
+        displayName = "BGContinuedProcessingTask(已提交,等待系统接管)"
+        launchDelivered = true
+        onLaunch?()
         return true
     }
 
@@ -117,20 +151,30 @@ final class ContinuedProcessingBackgroundExecution: BackgroundExecution {
     /// `registerContinuedProcessingLaunchHandler()`.
     func launchHandlerFired(_ task: BGContinuedProcessingTask) {
         self.task = task
-        displayName = "BGContinuedProcessingTask(iOS 26,已授予)"
-        launchGrantTimer?.invalidate()
-        launchGrantTimer = nil
-
+        displayName = "BGContinuedProcessingTask(iOS 26,已接管)"
         task.expirationHandler = { [weak self] in
             guard let self else { return }
             self.task = nil
             self.onExpire?()
+            // The task MUST be completed on expiration: leaving it dangling
+            // makes the system kill the process outright (observed as
+            // SIGKILL / "Debug session ended with code 9"), after which the
+            // system task UI reports the task as failed. The JVM thread is
+            // not exited here — the process simply gets suspended and the
+            // work resumes when the app is foregrounded again.
+            task.expirationHandler = nil
+            task.setTaskCompleted(success: false)
         }
 
         // Report progress over the 30-day presentation window.
         task.progress.totalUnitCount = Int64(30 * 24 * 3600)
 
-        onLaunch?()
+        // System relaunch: begin() never ran in this process, so the work
+        // starts here, headless.
+        if !launchDelivered {
+            launchDelivered = true
+            onLaunch?()
+        }
     }
 
     /// Feeds the task's NSProgress (elapsed seconds within 30 days).
@@ -139,8 +183,10 @@ final class ContinuedProcessingBackgroundExecution: BackgroundExecution {
     }
 
     func end() {
-        launchGrantTimer?.invalidate()
-        launchGrantTimer = nil
+        launchDelivered = false
+        // A still pending submission must not fire its handler for work
+        // that no longer exists.
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: continuedIdentifier)
         let current = task
         task = nil
         // Nil the expiration handler first: we are ending voluntarily, this
@@ -152,6 +198,24 @@ final class ContinuedProcessingBackgroundExecution: BackgroundExecution {
         }
         current?.setTaskCompleted(success: true)
     }
+
+    /// Maps BGTaskScheduler submit error codes to their documented causes so
+    /// the UI report says why, not just "error 4".
+    private static func describeSubmitError(_ error: Error) -> String {
+        guard let bgError = error as? BGTaskScheduler.Error else { return "\(error)" }
+        switch bgError.code {
+        case .unavailable:
+            return "\(error)(模拟器不支持后台处理)"
+        case .tooManyPendingTaskRequests:
+            return "\(error)(挂起的同类任务过多,请先停止再重试)"
+        case .notPermitted:
+            return "\(error)(Info.plist BGTaskSchedulerPermittedIdentifiers 不匹配或用户拒绝了后台启动)"
+        case .immediateRunIneligible:
+            return "\(error)(系统当前负载/条件不允许立即运行,.fail 语义)"
+        @unknown default:
+            return "\(error)"
+        }
+    }
 }
 
 // MARK: - Below iOS 26
@@ -162,20 +226,28 @@ final class FallbackBackgroundExecution: BackgroundExecution {
     var lastError: String? = nil
 
     private var task: UIBackgroundTaskIdentifier = .invalid
+    private var onLaunch: (() -> Void)?
+    private var onExpire: (() -> Void)?
 
-    func begin(onLaunch: @escaping () -> Void,
-               onExpire: @escaping () -> Void,
-               onFail: @escaping (String) -> Void) -> Bool {
+    var isClaimed: Bool { task != .invalid }
+
+    func setHandlers(onLaunch: @escaping () -> Void,
+                     onExpire: @escaping () -> Void) {
+        self.onLaunch = onLaunch
+        self.onExpire = onExpire
+    }
+
+    func begin() -> Bool {
         end()
-        task = UIApplication.shared.beginBackgroundTask(withName: "tinyjvm") {
-            onExpire()
-            self.end()
+        task = UIApplication.shared.beginBackgroundTask(withName: "tinyjvm") { [weak self] in
+            self?.onExpire?()
+            self?.end()
         }
         guard task != .invalid else {
             lastError = "beginBackgroundTask 被系统拒绝"
             return false
         }
-        onLaunch()
+        onLaunch?()
         return true
     }
 

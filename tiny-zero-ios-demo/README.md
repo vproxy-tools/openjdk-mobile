@@ -6,11 +6,13 @@
 `BGContinuedProcessingTask` 在后台长期运行(以 30 天为进度窗口);
 模拟器与 iOS<26 走 `beginBackgroundTask` 回退。
 
-> **状态(2026-08-30)**:模拟器 demo **完整运行并通过从零复现验证**
+> **状态(2026-08-31)**:模拟器 demo **完整运行并通过从零复现验证**
 > (`support/run-sim-demo.sh`,清空全部产物后单脚本重建,约 3 分钟构建;
 > JVM 引导热启动约 10 秒,冷启动实测可到 1–4 分钟):curl 返回 HTTP 200 与
-> Tiny Zero HTML(含系统时间与 properties 表),心跳/请求日志落盘,
-> `-autostop` 优雅停止。真机(device slice)尚未部署验证。
+> vproxy 应答,TCP/UDP 自检通过,心跳/请求日志落盘,`-autostop` 优雅停止。
+> **真机已跑通**(前台与后台模式:JVM 引导、libresolv DNS、TCP/UDP 自检、
+> HTTP 8080 应答、`BGContinuedProcessingTask` 接管),支持纯命令行部署
+> (`support/run-device-demo.py`,见 §8)。
 
 ## 1. 目录结构
 
@@ -83,8 +85,8 @@ content-length: 26
 
 vproxy 1.0.0-BETA-13-DEV
 --- Documents/java-console.log ---
-[native] wrote <容器>/.vproxy/resolv.conf
-trying to get name servers from <容器>/.vproxy/resolv.conf   ← vproxy 用的是写入的文件
+[native] wrote <容器>/Documents/.vproxy/resolv.conf
+trying to get name servers from <容器>/Documents/.vproxy/resolv.conf   ← vproxy 用的是写入的文件
 HTTP server is listening on 8080
 Making request: GET /hello
 TCP seems OK
@@ -227,15 +229,36 @@ java.time 的 `ZoneRulesProvider` 初始化会经 boot loader 资源查找走到
 ## 4. App 结构要点
 
 - **JVM 启动时序与模式开关**:UI"后台任务"开关(运行中锁定):
-  - 开(默认):提交 `BGContinuedProcessingTaskRequest` → **launchHandler
-    里启动 JVM**。**不做任何静默降级**:模拟器上 submit 返回 code=1
-    (unavailable)时直接报"submit 失败"且 JVM 不启动;提交成功但
-    launchHandler 10 秒未触发同样报错。只有 iOS<26(该 API 不存在)
+  - 开(默认):按 continued processing 的 SDK 语义——请求"立即或
+    提交后很快开始工作负载",系统**接管已在跑的工作**。流程:submit
+    (`.fail` 策略,系统不能立即运行会**当场抛错**如
+    `immediateRunIneligible`,而 `.queue` 会静默排队不启动)成功后
+    **立即启动 JVM**(前台工作负载开始);launchHandler 何时触发由
+    系统定(数秒后/退后台时/进程被杀后的**后台重启**),触发时接管
+    任务生命周期(expiration handler + 30 天 NSProgress),后台重启
+    场景下还会无 UI 直接启动 JVM 续跑。停止/退出时取消未派发的请求。
+    **不做任何静默降级**:submit 失败直接报错(附错误码文档化原因)
+    且 JVM 不启动;回到前台若发现墙钟时间远超活跃计数(= 后台期间
+    进程被挂起、未被接管)也会明确报告。只有 iOS<26(该 API 不存在)
     才使用 `beginBackgroundTask`。
   - 关:**前台直启**(`-direct`),与后台任务机制完全隔离。
-- **identifier**:iOS 26.5 拒绝 SDK 头文件建议的通配符形式,三处
-  (plist/register/request)使用同一具体 id
-  `com.wkgcass.tinyhttpserver.continued.demo`。
+- **identifier**:iOS 26.5 对 continued processing 有**三道检查**(均已
+  实测):
+  ① plist `BGTaskSchedulerPermittedIdentifiers`:具体 id 可匹配通配符
+  条目,但**提交通配符本身**报 Unrecognized Identifier(code=3)→
+  plist 同时列 `...continuedProcessing.*` 与具体 id;
+  ② submit 的 id 必须与 **register 的 id 精确一致**,否则 NSAssertion
+  直接崩溃(`_handleSubmissionWithoutRegistration...`)→ register/submit
+  都用具体 id `...continuedProcessing.demo`;
+  ③ 派发时还要求 id 前缀包含**大小写一致**的 bundle id——全小写的
+  id submit 能过但 handler 永远不来(真机第二轮 "submit 已成功但
+  系统未开始任务" 的根因)。
+- **后台任务的用户可见提示**(真机实测):后台任务运行期间,**通知中心
+  与锁屏界面**会出现系统提示,标题/说明即请求携带的
+  `title`/`subtitle`:**「Tiny Zero HTTP Server」/「嵌入式 JVM 后台
+  服务」**(iOS 26 continued processing 的系统呈现,文案定义在
+  `BackgroundExecution.swift` 的提交请求里);任务异常终结时同一入口
+  也会显示状态(如"任务失败")。
 - **NSProgress** 同步 30 天窗口;**持久化**:日志每行落盘
   `Documents/java-console.log`,状态落 `java-state.json`,杀进程重开
   可见中断状态与历史。
@@ -244,13 +267,15 @@ java.time 的 `ZoneRulesProvider` 初始化会经 boot loader 资源查找走到
   Main-Class),main 参数 `-Deploy=helloworld`(等价文档用法
   `java -jar vproxy.jar -Deploy=helloworld`);vproxy 完全零修改。
   UI 无端口输入(helloworld 固定 8080)。
-- **DNS 与 user.home**:启动前 native 侧收集系统 DNS(先解析
-  `/etc/resolv.conf` 的 `nameserver` 行,模拟器/macOS 有效;失败则
-  dlopen `libresolv.9.dylib` 走 `res_9_*`,真机路径),写入
-  `<容器>/.vproxy/resolv.conf`,任一失败即明确报错、不启动 JVM;同时
-  传 `-Duser.home=<容器>`,vproxy 的全部状态(含 `.vproxy/`)都落在
-  app 沙盒内,解析器优先读取该文件(vproxy 逻辑:先
-  `${user.home}/.vproxy/resolv.conf` 再 `/etc/resolv.conf`)。
+- **DNS 与 user.home**:启动前 native 侧经 **libresolv**(dlopen
+  `libresolv.9.dylib` 走 `res_9_*`;SDK 头文件对 iOS 标注不可用,故
+  手动解析符号;模拟器与真机**同一条路径**)收集系统 DNS,写入
+  `<user.home>/.vproxy/resolv.conf`,任一失败即明确报错、不启动 JVM。
+  `-Duser.home` 指向 `<容器>/Documents`:真机数据容器**根目录只读**
+  (首轮真机验证 `mkdir 根/.vproxy` 报 EPERM 后由容器根改为
+  Documents,模拟器容器根可写故此前未暴露)。vproxy 的全部状态(含
+  `.vproxy/`)都落在 app 沙盒内,解析器优先读取该文件(vproxy 逻辑:
+  先 `${user.home}/.vproxy/resolv.conf` 再 `/etc/resolv.conf`)。
 - **stdout/stderr → app 控制台(分段着色)**:`IosBootstrap`(第二个
   jar)经 RegisterNatives 注册 `nativeLog`,redirect 后**原样**逐行转发
   (含 ANSI);Swift 侧解析 SGR 色码做分段渲染——只有色码覆盖的部分
@@ -268,10 +293,12 @@ java.time 的 `ZoneRulesProvider` 初始化会经 boot loader 资源查找走到
 ## 5. 链接与运行时要求(app 集成 libtinyjvm 时必须)
 
 1. `-lz`(zlib)、`-framework CoreFoundation`(java.base locale/属性 native)
-2. **`-Wl,-export_dynamic`**(模拟器):把静态链接的 JNI 符号
-   (`Java_*`/`JVM_*`)放进动态符号表,配合已合入的 `os_posix` 修复(`RTLD_DEFAULT`)
+2. **`-Wl,-export_dynamic`**(模拟器与真机):把静态链接的 JNI 符号
+   (`Java_*`/`JVM_*`)放进动态符号表,配合已合入的 os_posix 修复(`RTLD_DEFAULT`)
    查找;缺失会导致所有 native 解析落入 Java `ClassLoader.findNative`
-   兜底并死锁(§6)。
+   兜底并死锁(§6)。真机 Debug 还需关闭 Xcode 26 的 debug dylib
+   (`ENABLE_DEBUG_DYLIB[sdk=iphoneos*]=NO`,project.yml 已配置),
+   否则 JVM 符号被链进 `TinyHttpServer.debug.dylib` 而非主可执行文件。
 3. `Native/ios_wx_shims.mm`:`os::_jit_exec_enabled` 等三个符号的 weak
    定义(Zero variant 不编译 bsd_aarch64 的真实定义)。
 4. **app 类的 native 方法需显式 `RegisterNatives`**(静态构建中
@@ -296,6 +323,34 @@ JDKUnsafe 路径,免反射告警)。
 
 ## 6. 已解决的关键问题(排障记录)
 
+- **真机首轮三连修(2026-08-31)**:
+  ① **数据容器根目录在真机只读**——`user.home` 原指容器根,真机
+  `mkdir <容器>/.vproxy` 报 `Operation not permitted`(模拟器容器根
+  可写,故未暴露);真机沙盒也读不到 `/etc/resolv.conf`。修复:
+  `user.home` 改指 `<容器>/Documents`,DNS 收集统一走 libresolv,
+  不再尝试解析 `/etc/resolv.conf`(模拟器与真机同一条路径)。
+  ② **`BGContinuedProcessingTask` 提交策略**——`.queue` 下系统负载高
+  时请求进队列尾部,submit 成功但 launchHandler 不触发("系统未授予
+  continued processing")。SDK 头文件语义:该请求"立即或提交后很快
+  开始工作负载";`.fail` 策略下系统不能立即运行会当场抛
+  `immediateRunIneligible`(code=4)。修复:改 `.fail` 并附错误码
+  文档化原因。
+- **真机第三轮(后台长跑被 signal 9 杀死)**:后台放置较久后 Xcode 报
+  "Terminated due to signal 9"、系统通知显示"任务失败"。根因:
+  expirationHandler 只报错、**未调用 `setTaskCompleted`**,任务悬空,
+  系统按文档语义("忘记 setTaskCompleted 可能导致进程被杀")直接杀掉
+  进程。修复:expiration 时收尾任务(`setTaskCompleted(false)`),进程
+  转入正常挂起、回前台后 JVM 线程继续。系统通知的"继续"按钮对应
+  后台重启续跑——锁屏或冷引导数分钟时看起来像无反应,属预期。
+- **真机第二轮(前台模式已跑通)**:submit(.fail) 成功但 launchHandler
+  30 秒不触发。根因:派发要求 identifier 前缀包含**大小写一致**的
+  bundle id;此前的具体 id 与 bundle id `com.wkgcass.TinyHttpServer`
+  大小写不匹配,submit 能过、任务却派发不到 handler。identifier 机制
+  经模拟器逐项实测后定型(plist=通配符+具体 id,register/submit=具体
+  id,三道检查详见 §4 identifier 条)。同时按 SDK 语义重构时序为
+  "submit 成功即启动工作负载,handler 只负责接管",支持进程被杀后的
+  后台重启(handler 里直接启动 JVM),回到前台检测"曾被挂起"并报告,
+  停止时取消未派发请求。
 - **引导期 NoClassDefFoundError 构造风暴(数百万次,最终根因)**:
   `os::get_default_process_handle()` 使用 `dlopen(0, RTLD_FIRST)`,在
   macOS two-level namespace 下**只搜索主可执行镜像**,而静态链接的 JNI
@@ -335,12 +390,49 @@ JDKUnsafe 路径,免反射告警)。
   `BGContinuedProcessingTask` 的真实验证需 iOS 26 真机。
 - 模拟器 ad-hoc 签名丢 entitlement,每次构建后需手动补签(§2)。
 
-## 8. 真机部署(需要你参与)
+## 8. 真机部署与验证(已跑通,支持纯命令行)
 
-1. `xcodegen generate` 后用 Xcode 打开工程,Signing & Capabilities 选
-   你的 Team(免费个人账号即可)
-2. iPhone 13 连接后直接 Run(链接 device slice `libtinyjvm.a`,
-   Tiny Zero/Zero variant)。§5 的链接要求同样适用;真机无 MAP_JIT
-   语义,CodeCache 行为是首要观察点(遇到问题带 `tmp/hs_err_pid*.log`)
-3. iOS 26 真机上 `BGContinuedProcessingTask` 生效(submit 已按 iOS 26.5
-   实测语义实现)
+1. **一键命令行(推荐,无 Xcode GUI)**:
+
+   ```bash
+   cd tiny-zero-ios-demo
+   ./support/run-device-demo.py                                      # 默认 -autostart(后台任务流程)
+   LAUNCH_ARGS="-autostart -direct" ./support/run-device-demo.py   # 前台直启(隔离后台机制)
+   ```
+
+   脚本自动完成:选择已连接设备 → 装配 device 产物(缺失时)→ 从本机
+   描述文件推导签名 team → `xcodebuild -allowProvisioningUpdates` 签名
+   构建(全程不打开 Xcode)→ `devicectl` 安装并带参启动 → curl 验证 →
+   从 app 沙盒拉回 `Documents/java-console.log`。注意:
+   - **首次**仍需在 Xcode GUI 里选一次 team 并 Run,以在本机生成描述
+     文件;个人团队描述文件 **7 天有效**,脚本会显示到期时间,过期时
+     先尝试经 `-allowProvisioningUpdates` 无人值守续签(依赖 Xcode 的
+     Apple ID 会话),仅当会话失效时才需打开 Xcode 登录并 GUI Run 一次;
+   - 启动需手机**解锁**状态(iOS 拒绝锁屏拉起 app,`--no-activate`
+     也不行;脚本会识别该错误并明确提示);
+   - HTTP 验证用 Bonjour 主机名 `<设备名>.local`(解析到手机 Wi-Fi
+     IP),也可 `DEVICE_IP=<手机IP>` 指定;Mac 与手机需同一网络;
+   - app 参数用 `--` 与 devicectl 自身参数分隔(否则 `-autostart` 会被
+     解析成 devicectl 的短选项束而启动失败);
+   - 可用环境变量覆盖:`DEVICE`/`TEAM_ID`/`LAUNCH_ARGS`/`DEVICE_IP`/`PORT`。
+
+2. **产物装配**(脚本会自动做;手动等价命令):
+
+   ```bash
+   cd tiny-zero-ios-demo
+   cp ../tiny-zero-ios-build/dist/device/lib/libtinyjvm.a third_party/
+   cp ../tiny-zero-ios-build/dist/device/runtime/lib/modules third_party/lib/lib/
+   cp ../tiny-zero-ios-build/dist/device/runtime/release third_party/lib/
+   xcodegen generate
+   ```
+
+   真机 slice 链接已验证(JNI 符号 `JNI_CreateJavaVM`、`JNI_OnLoad_jimage`、
+   103 个 `Java_*` 在主可执行文件导出表中,weak W^X 垫片全部解析,
+   bundle 内 runtime 布局与模拟器一致)。
+
+3. **观察点**:真机无 MAP_JIT 语义,CodeCache 行为是首要观察点;遇到
+   崩溃带 app 沙盒 `tmp/hs_err_pid*.log`(`xcrun devicectl device copy
+   from --domain-type appDataContainer --domain-identifier
+   com.wkgcass.TinyHttpServer --source tmp/ --destination .` 或 Xcode →
+   Devices and Simulators → 下载 App Container);DNS 走 libresolv
+   (真机读不到 `/etc/resolv.conf` 属预期回退)。

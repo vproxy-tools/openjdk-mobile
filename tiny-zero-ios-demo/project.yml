@@ -26,7 +26,8 @@ targets:
       properties:
         CFBundleDisplayName: Tiny Zero Demo
         BGTaskSchedulerPermittedIdentifiers:
-          - com.wkgcass.tinyhttpserver.continued.demo
+          - com.wkgcass.TinyHttpServer.continuedProcessing.*
+          - com.wkgcass.TinyHttpServer.continuedProcessing.demo
         UILaunchScreen: {}
     settings:
       base:
@@ -48,7 +49,13 @@ targets:
         # resolution falls back to ClassLoader.findNative, which deadlocks
         # in class-initialization reentry during bootstrap.
         OTHER_LDFLAGS[sdk=iphonesimulator*]: -lz -framework CoreFoundation -Wl,-export_dynamic -ltinyjvm-sim
-        OTHER_LDFLAGS[sdk=iphoneos*]: -lz -framework CoreFoundation -ltinyjvm
+        OTHER_LDFLAGS[sdk=iphoneos*]: -lz -framework CoreFoundation -Wl,-export_dynamic -ltinyjvm
+        # Xcode 26 Debug links app code (and with it the statically linked
+        # JVM) into TinyHttpServer.debug.dylib; the embedding expects the JVM
+        # in the main executable (java_home derivation + process-handle
+        # native lookup), so keep Debug == Release on device. The simulator
+        # Debug flow is verified with the debug dylib + export_dynamic.
+        ENABLE_DEBUG_DYLIB[sdk=iphoneos*]: NO
         # The embedded JVM needs an executable code cache; simulator app
         # processes require the JIT entitlement for that mapping.
         CODE_SIGN_ENTITLEMENTS[sdk=iphonesimulator*]: App/Simulator.entitlements

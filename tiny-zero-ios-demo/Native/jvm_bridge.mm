@@ -5,10 +5,6 @@
 #include <cstdarg>
 #include <pthread.h>
 
-// Declared with C linkage at file scope instead of including <pthread.h>:
-// the SDK guards this function behind availability macros that vary between
-// macOS/iOS SDK generations.
-extern "C" void pthread_jit_write_protect_np(int enabled) __API_AVAILABLE(macos(11.0), ios(14.0));
 #include <arpa/inet.h>
 #include <dlfcn.h>
 #include <errno.h>
@@ -36,6 +32,20 @@ struct StartArgs {
   char user_home[1024];
 };
 
+// pthread_jit_write_protect_np exists only in the macOS/simulator libsystem
+// (the SDK headers mark it unavailable for iOS), so it is resolved at
+// runtime like the merged signals_posix lazy W^X fix does: the real function
+// runs on the simulator; on a real device it is absent (null) and skipped,
+// which is correct — devices have no MAP_JIT pages to align.
+void align_thread_wx_state() {
+  typedef int (*jit_protect_fn)(int);
+  static jit_protect_fn fn =
+      reinterpret_cast<jit_protect_fn>(dlsym(RTLD_DEFAULT, "pthread_jit_write_protect_np"));
+  if (fn != nullptr) {
+    fn(0);
+  }
+}
+
 void report_error(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void report_error(const char *fmt, ...) {
   va_list ap;
@@ -50,85 +60,64 @@ void forward_log(const char *line) {
   }
 }
 
-// Collects the system DNS servers and writes vproxy's resolver config to
-// <user_home>/.vproxy/resolv.conf (vproxy reads ${user.home}/.vproxy/
-// resolv.conf before /etc/resolv.conf). Sources, in order:
-//   1. /etc/resolv.conf ("nameserver x.x.x.x" lines) - present on macOS
-//      and therefore on the simulator.
-//   2. libresolv's res_9_* functions via dlopen - for environments without
-//      the file (real iOS devices); the symbols are resolved manually
-//      because the SDK headers mark them unavailable for iOS.
+// Collects the system DNS servers through libresolv (res_9_ninit /
+// res_9_getservers / res_9_ndestroy, dlopen'ed because the SDK headers mark
+// them unavailable for iOS; works on both simulator and real devices) and
+// writes vproxy's resolver config to <user_home>/.vproxy/resolv.conf
+// (vproxy reads ${user.home}/.vproxy/resolv.conf before /etc/resolv.conf).
 // Any failure is reported with detail and stops the start; nothing is
 // silently skipped.
 bool write_resolv_conf(const char *user_home) {
   std::string servers;
 
-  FILE *f = fopen("/etc/resolv.conf", "r");
-  if (f != nullptr) {
-    char line[512];
-    while (fgets(line, sizeof(line), f) != nullptr) {
-      char ip[256];
-      if (sscanf(line, " nameserver %255s", ip) == 1) {
-        servers += "nameserver ";
-        servers += ip;
-        servers += "\n";
-      }
-    }
-    fclose(f);
-  } else {
-    forward_log("[native] /etc/resolv.conf not readable; trying libresolv");
+  // struct __res_9_state is not in the iOS SDK headers; the buffer below
+  // is far larger than the actual struct. res_9_sockaddr_union holds a
+  // sockaddr_storage; 128 bytes per slot is sufficient.
+  typedef int (*ninit_t)(void *);
+  typedef int (*getservers_t)(void *, void *, int);
+  typedef void (*ndestroy_t)(void *);
+  void *h = dlopen("libresolv.9.dylib", RTLD_LAZY);
+  if (h == nullptr) {
+    report_error("cannot collect DNS servers: dlopen(libresolv.9.dylib) failed: %s", dlerror());
+    return false;
   }
-
+  auto ninit = reinterpret_cast<ninit_t>(dlsym(h, "res_9_ninit"));
+  auto getservers = reinterpret_cast<getservers_t>(dlsym(h, "res_9_getservers"));
+  auto ndestroy = reinterpret_cast<ndestroy_t>(dlsym(h, "res_9_ndestroy"));
+  if (ninit == nullptr || getservers == nullptr || ndestroy == nullptr) {
+    report_error("cannot collect DNS servers: libresolv.9.dylib lacks res_9_* symbols");
+    return false;
+  }
+  alignas(16) unsigned char state[4096];
+  unsigned char addrs[16][128];
+  memset(state, 0, sizeof(state));
+  if (ninit(state) != 0) {
+    report_error("cannot collect DNS servers: res_9_ninit failed");
+    return false;
+  }
+  int n = getservers(state, addrs, 16);
+  char buf[INET6_ADDRSTRLEN];
+  for (int i = 0; i < n && i < 16; i++) {
+    sockaddr *sa = reinterpret_cast<sockaddr *>(&addrs[i]);
+    void *in;
+    if (sa->sa_family == AF_INET) {
+      in = &reinterpret_cast<sockaddr_in *>(sa)->sin_addr;
+    } else if (sa->sa_family == AF_INET6) {
+      in = &reinterpret_cast<sockaddr_in6 *>(sa)->sin6_addr;
+    } else {
+      continue;
+    }
+    if (inet_ntop(sa->sa_family, in, buf, sizeof(buf)) == nullptr) {
+      continue;
+    }
+    servers += "nameserver ";
+    servers += buf;
+    servers += "\n";
+  }
+  ndestroy(state);
   if (servers.empty()) {
-    // struct __res_9_state is not in the iOS SDK headers; the buffer below
-    // is far larger than the actual struct. res_9_sockaddr_union holds a
-    // sockaddr_storage; 128 bytes per slot is sufficient.
-    typedef int (*ninit_t)(void *);
-    typedef int (*getservers_t)(void *, void *, int);
-    typedef void (*ndestroy_t)(void *);
-    void *h = dlopen("libresolv.9.dylib", RTLD_LAZY);
-    if (h == nullptr) {
-      report_error("cannot collect DNS servers: /etc/resolv.conf missing/unreadable and dlopen(libresolv.9.dylib) failed: %s", dlerror());
-      return false;
-    }
-    auto ninit = reinterpret_cast<ninit_t>(dlsym(h, "res_9_ninit"));
-    auto getservers = reinterpret_cast<getservers_t>(dlsym(h, "res_9_getservers"));
-    auto ndestroy = reinterpret_cast<ndestroy_t>(dlsym(h, "res_9_ndestroy"));
-    if (ninit == nullptr || getservers == nullptr || ndestroy == nullptr) {
-      report_error("cannot collect DNS servers: libresolv.9.dylib lacks res_9_* symbols");
-      return false;
-    }
-    alignas(16) unsigned char state[4096];
-    unsigned char addrs[16][128];
-    memset(state, 0, sizeof(state));
-    if (ninit(state) != 0) {
-      report_error("cannot collect DNS servers: res_9_ninit failed");
-      return false;
-    }
-    int n = getservers(state, addrs, 16);
-    char buf[INET6_ADDRSTRLEN];
-    for (int i = 0; i < n && i < 16; i++) {
-      sockaddr *sa = reinterpret_cast<sockaddr *>(&addrs[i]);
-      void *in;
-      if (sa->sa_family == AF_INET) {
-        in = &reinterpret_cast<sockaddr_in *>(sa)->sin_addr;
-      } else if (sa->sa_family == AF_INET6) {
-        in = &reinterpret_cast<sockaddr_in6 *>(sa)->sin6_addr;
-      } else {
-        continue;
-      }
-      if (inet_ntop(sa->sa_family, in, buf, sizeof(buf)) == nullptr) {
-        continue;
-      }
-      servers += "nameserver ";
-      servers += buf;
-      servers += "\n";
-    }
-    ndestroy(state);
-    if (servers.empty()) {
-      report_error("no DNS servers found (/etc/resolv.conf and libresolv both gave nothing)");
-      return false;
-    }
+    report_error("no DNS servers found (libresolv gave nothing)");
+    return false;
   }
 
   std::string dir = std::string(user_home) + "/.vproxy";
@@ -180,7 +169,7 @@ void *jvm_thread_main(void *arg) {
   // write-enabled): on macOS 26 the system default is write-protected, and
   // the healing's own enable/disable calls are compiled out for iOS targets
   // unless patched for the simulator (see support/build-sim-jvm.sh).
-  pthread_jit_write_protect_np(0);
+  align_thread_wx_state();
 
   // NOTE: -Djava.home is deliberately NOT passed: hotspot's os_bsd.cpp
   // (__IOS__ + statically linked) derives java_home = <executable dir>/lib
@@ -356,9 +345,9 @@ extern "C" int tinyvm_start(const char *runtime_home, const char *jar_paths, con
   g_log_fn = log_fn;
   g_exit_fn = exit_fn;
 
-  // Before the JVM starts: collect DNS servers and write
+  // Before the JVM starts: collect DNS servers through libresolv and write
   // <user_home>/.vproxy/resolv.conf, so vproxy's resolver has servers on
-  // both simulator (macOS /etc/resolv.conf) and device (libresolv).
+  // both simulator and device (same code path).
   if (!write_resolv_conf(user_home)) {
     return 1;
   }

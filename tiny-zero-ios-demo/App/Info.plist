@@ -4,7 +4,8 @@
 <dict>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
-		<string>com.wkgcass.tinyhttpserver.continued.demo</string>
+		<string>com.wkgcass.TinyHttpServer.continuedProcessing.*</string>
+		<string>com.wkgcass.TinyHttpServer.continuedProcessing.demo</string>
 	</array>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
