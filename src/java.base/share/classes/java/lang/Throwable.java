@@ -859,6 +859,12 @@ public class Throwable implements Serializable {
     }
 
     private synchronized StackTraceElement[] getOurStackTrace() {
+        // TINY-ZERO FIX (simulator): before the VM is booted the stack
+        // machinery cannot materialize elements yet; an empty trace keeps
+        // bootstrap-time exception handling usable.
+        if (!jdk.internal.misc.VM.isBooted()) {
+            return UNASSIGNED_STACK;
+        }
         // Initialize stack trace field with information from
         // backtrace if this is the first call to this method
         if (stackTrace == UNASSIGNED_STACK || stackTrace == null) {

@@ -1,0 +1,8 @@
+# Local machine-specific configuration (private absolute paths)
+config/build.env
+
+# Generated build workspace: logs, generated keeper metadata, jmods
+work/
+
+# Generated deliverables (dist/device, tar.gz, checksums)
+dist/

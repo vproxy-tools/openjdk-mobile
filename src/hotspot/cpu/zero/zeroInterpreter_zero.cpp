@@ -220,6 +220,14 @@ void ZeroInterpreter::main_loop(int recurse, TRAPS) {
     if (istate->msg() == BytecodeInterpreter::call_method) {
       Method* callee = istate->callee();
 
+      // TINY-ZERO FIX: an invokevirtual target that has not been linked yet
+      // reports from_interpreted_entry() == nullptr; fall back to the
+      // interpreter entry table, the same source Method::link_method uses.
+      if (istate->callee_entry_point() == nullptr && callee != nullptr) {
+        istate->set_callee_entry_point(
+            AbstractInterpreter::entry_for_method(methodHandle(thread, callee)));
+      }
+
       // Trim back the stack to put the parameters at the top
       stack->set_sp(istate->stack() + 1);
 
@@ -800,7 +808,17 @@ InterpreterFrame *InterpreterFrame::build(Method* const method, TRAPS) {
   istate->set_prev_link(nullptr);
   istate->set_thread(thread);
   istate->set_bcp(method->is_native() ? nullptr : method->code_base());
-  istate->set_constants(method->constants()->cache());
+  // TINY-ZERO FIX: a klass that has not been rewritten/linked yet (early
+  // bootstrap on this port) has no constant pool cache, which the zero
+  // interpreter dereferences immediately; run the rewriter on demand.
+  {
+    ConstantPoolCache* cpc = method->constants()->cache();
+    if (cpc == nullptr) {
+      method->method_holder()->link_class(thread);
+      cpc = method->constants()->cache();
+    }
+    istate->set_constants(cpc);
+  }
   istate->set_msg(BytecodeInterpreter::method_entry);
   istate->set_oop_temp(nullptr);
   istate->set_callee(nullptr);

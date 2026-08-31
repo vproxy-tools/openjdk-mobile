@@ -821,6 +821,13 @@ size_t os::reserve_memory_limit() {
 }
 
 void* os::get_default_process_handle() {
+#if defined(__APPLE__) && defined(__IOS__)
+  // TINY-ZERO FIX: search the global namespace for statically linked builds
+  // so JNI symbols in any linked image are found.
+  if (is_vm_statically_linked()) {
+    return (void*)-2 /* RTLD_DEFAULT */;
+  }
+#endif
 #ifdef __APPLE__
   // MacOS X needs to use RTLD_FIRST instead of RTLD_LAZY
   // to avoid finding unexpected symbols on second (or later)

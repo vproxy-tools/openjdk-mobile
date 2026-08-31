@@ -1,5 +1,7 @@
 /build/
 /dist/
+# Tiny Zero iOS: generated into the source tree by tiny-zero-ios-build
+/src/hotspot/os/bsd/symbol_keeper.cpp
 /.idea/
 /.vscode/
 /nbproject/

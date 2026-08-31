@@ -88,8 +88,14 @@ char* os::non_memory_address_word() {
 }
 
 address os::Posix::ucontext_get_pc(const ucontext_t* uc) {
+  // TINY-ZERO FIX: crash-path only; return the real pc so hs_err can print
+  // native frames instead of hitting ShouldNotCallThis during reporting.
+#if defined(AARCH64) && defined(__APPLE__)
+  return (address)uc->uc_mcontext->__ss.__pc;
+#else
   ShouldNotCallThis();
   return nullptr;
+#endif
 }
 
 void os::Posix::ucontext_set_pc(ucontext_t * uc, address pc) {

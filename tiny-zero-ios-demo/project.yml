@@ -1,0 +1,67 @@
+name: TinyHttpServer
+options:
+  bundleIdPrefix: com.wkgcass
+  deploymentTarget:
+    iOS: "17.0"
+
+targets:
+  TinyHttpServer:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+      - path: JvmEmbed/Native
+      - path: JvmEmbed/Swift
+      - path: third_party/vproxy.jar
+        buildPhase: resources
+      - path: third_party/vproxy-ios-bootstrap.jar
+        buildPhase: resources
+      # Blue folder reference copied into the bundle as "lib/". The statically
+      # linked iOS JVM derives java_home = <bundle>/lib and then opens
+      # <java_home>/lib/modules, so the image must live at lib/lib/modules.
+      - path: third_party/lib
+        type: folder
+        buildPhase: resources
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: Tiny Zero Demo
+        # BGTaskSchedulerPermittedIdentifiers must list BOTH the wildcard and
+        # the concrete identifier; the prefix must match the bundle ID's case
+        # exactly (see JvmEmbed/Swift/BackgroundExecution.swift).
+        BGTaskSchedulerPermittedIdentifiers:
+          - $(PRODUCT_BUNDLE_IDENTIFIER).continuedProcessing.*
+          - $(PRODUCT_BUNDLE_IDENTIFIER).continuedProcessing.demo
+        UILaunchScreen: {}
+    settings:
+      base:
+        SWIFT_OBJC_BRIDGING_HEADER: JvmEmbed/Native/jvm_bridge.h
+        # jni.h for jvm_bridge.mm.
+        HEADER_SEARCH_PATHS:
+          - ../tiny-zero-ios-build/dist/device/include
+        SWIFT_VERSION: "5.0"
+        DEAD_CODE_STRIPPING: YES
+        ARCHS: arm64
+        LIBRARY_SEARCH_PATHS: third_party
+        # Per-platform static JVM library (an xcframework is not used:
+        # -create-xcframework rejects the server-variant simulator archive
+        # with "binaries with multiple platforms" even though every member
+        # is ios-simulator).
+        # -export_dynamic puts the statically linked JNI symbols
+        # (Java_*, JVM_*) into the dynamic symbol table so the VM's
+        # dlsym-based native lookup finds them; without it every native
+        # resolution falls back to ClassLoader.findNative, which deadlocks
+        # in class-initialization reentry during bootstrap.
+        OTHER_LDFLAGS[sdk=iphonesimulator*]: -lz -framework CoreFoundation -Wl,-export_dynamic -ltinyjvm-sim
+        OTHER_LDFLAGS[sdk=iphoneos*]: -lz -framework CoreFoundation -Wl,-export_dynamic -ltinyjvm
+        # Xcode 26 Debug links app code (and with it the statically linked
+        # JVM) into TinyHttpServer.debug.dylib; the embedding expects the JVM
+        # in the main executable (java_home derivation + process-handle
+        # native lookup), so keep Debug == Release on device. The simulator
+        # Debug flow is verified with the debug dylib + export_dynamic.
+        ENABLE_DEBUG_DYLIB[sdk=iphoneos*]: NO
+        # The embedded JVM needs an executable code cache; simulator app
+        # processes require the JIT entitlement for that mapping.
+        CODE_SIGN_ENTITLEMENTS[sdk=iphonesimulator*]: App/Simulator.entitlements
+        # Ad-hoc signature on the simulator so the entitlement is embedded.
+        CODE_SIGN_IDENTITY[sdk=iphonesimulator*]: "-"
