@@ -142,12 +142,8 @@ final class ContinuedProcessingBackgroundExecution: BackgroundExecution {
         let permitted = Bundle.main.object(
             forInfoDictionaryKey: "BGTaskSchedulerPermittedIdentifiers") as? [String] ?? []
         guard permitted.contains(continuedIdentifier) else {
-            lastError = "此安装的 bundle id 被签名工具改写为 \(continuedBundleID)，"
-                + "后台任务标识 \(continuedIdentifier) 未列入 BGTaskSchedulerPermittedIdentifiers "
-                + "白名单，后台模式不可用（iLoader 已知问题）。用 patch-ipa-team.py 给 ipa "
-                + "打补丁后重签安装即可：python3 patch-ipa-team.py <ipa> <teamid>"
-                + "（teamid 取上面 bundle id 的末段 \(teamSuffixHint)）；"
-                + "或关闭「后台任务」开关使用前台模式"
+            lastError = "后台模式不可用（iLoader 已知问题）。用脚本给 ipa 打补丁后重签安装："
+                + "python3 patch-ipa-team.py <ipa> \(teamSuffixHint)"
             return false
         }
 
