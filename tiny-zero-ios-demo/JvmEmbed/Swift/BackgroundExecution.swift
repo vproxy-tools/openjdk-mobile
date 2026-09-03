@@ -61,9 +61,14 @@ protocol BackgroundExecution: AnyObject {
 
 /// Identifier rules, derived empirically on iOS 26.5 — all three checks must
 /// pass or the task is never dispatched:
-///   1. Info.plist BGTaskSchedulerPermittedIdentifiers must list BOTH a
-///      wildcard entry and the concrete identifier (submitting the wildcard
-///      itself is "Unrecognized Identifier", code 3).
+///   1. Info.plist BGTaskSchedulerPermittedIdentifiers matches EXACT
+///      entries only (verified: neither a trailing "<x>.*" nor middle
+///      wildcards match across dot segments), so the plist must list the
+///      concrete identifier literally. Submitting the wildcard itself is
+///      "Unrecognized Identifier", code 3. Consequence: a distribution
+///      whose bundle id was rewritten by the signing tool (sideloaders
+///      append ".<TEAMID>") cannot pass this gate - begin() pre-checks the
+///      app's own plist and fails with a clear remedy instead.
 ///   2. register() and submit() must use the exact same concrete identifier
 ///      (a concrete submit against a wildcard registration crashes on an
 ///      NSAssertion).
@@ -121,6 +126,20 @@ final class ContinuedProcessingBackgroundExecution: BackgroundExecution {
     func begin() -> Bool {
         lastError = nil
         launchDelivered = false
+
+        // The plist gate matches exact identifiers only (rule 1 above). A
+        // rewritten bundle id (sideload tools append ".<TEAMID>") can never
+        // match the build-time plist entries, so check our own Info.plist
+        // up front and fail with a clear remedy instead of the raw
+        // "Unrecognized Identifier" submit error.
+        let permitted = Bundle.main.object(
+            forInfoDictionaryKey: "BGTaskSchedulerPermittedIdentifiers") as? [String] ?? []
+        guard permitted.contains(continuedIdentifier) else {
+            lastError = "bundle id 被安装工具改写(\(continuedBundleID)),"
+                + "任务标识 \(continuedIdentifier) 不在 BGTaskSchedulerPermittedIdentifiers "
+                + "白名单;请关闭「后台任务」开关用前台模式,或以保留原始 bundle id 的方式签名安装"
+            return false
+        }
 
         // Submitting a new request with the same id replaces the queued one.
         // Strategy .fail (SDK semantics, iOS 26): either the system commits
