@@ -135,10 +135,10 @@ final class ContinuedProcessingBackgroundExecution: BackgroundExecution {
         let permitted = Bundle.main.object(
             forInfoDictionaryKey: "BGTaskSchedulerPermittedIdentifiers") as? [String] ?? []
         guard permitted.contains(continuedIdentifier) else {
-            lastError = "bundle id 被安装工具改写(\(continuedBundleID)),"
-                + "任务标识 \(continuedIdentifier) 不在 BGTaskSchedulerPermittedIdentifiers "
-                + "白名单;请关闭「后台任务」开关用前台模式,或以保留原始 bundle id 的方式"
-                + "签名安装,或让分发者以 TEAM_ID=<你的team id> 重新打包"
+            lastError = "此安装的 bundle id 被签名工具改写为 \(continuedBundleID)，"
+                + "后台任务标识 \(continuedIdentifier) 未列入 BGTaskSchedulerPermittedIdentifiers "
+                + "白名单，后台模式不可用。请将此报错复制发送给开发者，据其中的 team id "
+                + "构建专属 ipa 后后台模式即可使用；或关闭「后台任务」开关使用前台模式"
             return false
         }
 

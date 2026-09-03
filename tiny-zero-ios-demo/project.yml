@@ -4,6 +4,20 @@ options:
   deploymentTarget:
     iOS: "17.0"
 
+# Shared scheme so headless xcodebuild invocations (sim demo, device demo,
+# ipa packaging) never depend on Xcode's autocreation state.
+schemes:
+  TinyHttpServer:
+    build:
+      targets:
+        TinyHttpServer: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+    archive:
+      config: Release
+
 targets:
   TinyHttpServer:
     type: application

@@ -99,7 +99,7 @@ Xcode GUI 选 team 并 Run 一次生成本机描述文件；手机需保持解�
 匹配**（通配条目实测无效，故只保留具体条目）。部分侧载工具（如
 iLoader）会把 bundle id 改写为 `com.foo.App.<TEAMID>`，却**没有同步
 改写**白名单（其 bug），导致这类安装后台任务被拒——app 会自检并明确
-报错。解决办法（二选一）：
+报错（错误卡片带一键复制，可直接转发给开发者构建专属 ipa）。解决办法（二选一）：
 
 ```bash
 TEAM_ID=<接收方team id> ./support/package-ipa.py   # 烘入带 team 的标识

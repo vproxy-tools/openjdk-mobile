@@ -101,13 +101,40 @@ struct ContentView: View {
     }
 
     private func errorBanner(_ text: String) -> some View {
-        Text(text)
-            .font(.footnote)
-            .foregroundStyle(.white)
-            .textSelection(.enabled)
+        ErrorBanner(text: text)
+    }
+
+    /// The red error card with a copy button: errors like the background-task
+    /// whitelist mismatch are meant to be forwarded to the developer verbatim
+    /// (they contain the team id a dedicated ipa must be built with).
+    private struct ErrorBanner: View {
+        let text: String
+        @State private var copied = false
+
+        var body: some View {
+            HStack(alignment: .top, spacing: 8) {
+                Text(text)
+                    .font(.footnote)
+                    .foregroundStyle(.white)
+                    .textSelection(.enabled)
+                Spacer(minLength: 4)
+                Button {
+                    UIPasteboard.general.string = text
+                    copied = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        copied = false
+                    }
+                } label: {
+                    Text(copied ? "已复制" : "复制")
+                        .font(.footnote.weight(.semibold))
+                }
+                .tint(.white)
+                .buttonStyle(.bordered)
+            }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(10)
             .background(RoundedRectangle(cornerRadius: 8).fill(.red.opacity(0.85)))
+        }
     }
 
     private var logView: some View {
