@@ -100,7 +100,9 @@ libtool -static -o "$DEMO_ROOT/third_party/libtinyjvm-sim.a" \
 # Runtime image: same jmod/jlink contract workarounds as the device pipeline
 # (shared in tiny-zero-ios-build/scripts/lib/runtime-image.sh), then the full
 # <bundle>/lib tree including conf/, lib/tzdb.dat and the builtin-lib marker
-# files (0-byte libjimage.dylib/libj2pkcs11.dylib route System.loadLibrary of
+# files (minimal valid Mach-O stubs; content is never loaded, but external
+# signing tools require every bundle .dylib to be real Mach-O) route
+# System.loadLibrary of
 # the statically linked internal libraries through findBuiltinLib and skip
 # dlopen entirely).
 mkdir -p "$DEMO_ROOT/work-generated"

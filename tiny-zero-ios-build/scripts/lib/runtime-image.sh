@@ -70,6 +70,32 @@ jlink_tiny_runtime() {
   [[ -f "$out_dir/release" ]] || die "jlink did not produce $out_dir/release"
 }
 
+# make_marker_dylibs <dest_lib_dir> <sdk: iphoneos|iphonesimulator>
+# Builds the libjimage/libj2pkcs11 marker dylibs for one target platform as
+# minimal VALID Mach-O files. The JVM builtin-lib protocol only needs the
+# file to exist on the system library path - its content is never loaded
+# (findBuiltinLib resolves JNI_OnLoad_<name> in the process image and skips
+# dlopen) - but external signing tools (iLoader/Sideloadly/...) validate
+# every *.dylib in the bundle and reject non-Mach-O files ("file is too
+# small"), so 0-byte markers do not survive distribution. Device packaging
+# regenerates these for iphoneos after a simulator build staged the
+# simulator slice (same shared third_party/lib tree).
+make_marker_dylibs() {
+  local dest="$1" sdk="$2" tmp name
+  tmp="$(mktemp -d)"
+  cat >"$tmp/marker.c" <<'EOF'
+/* Content never loads: the file's existence routes statically linked
+   internal libraries through findBuiltinLib instead of dlopen. */
+void tiny_zero_builtin_lib_marker(void) {}
+EOF
+  for name in jimage j2pkcs11; do
+    xcrun --sdk "$sdk" clang -shared -arch arm64 \
+      -Wl,-install_name,@rpath/lib$name.dylib \
+      -o "$dest/lib$name.dylib" "$tmp/marker.c"
+  done
+  rm -rf "$tmp"
+}
+
 # stage_runtime_lib <jlink_out_dir> <boot_jdk> <dest_lib_dir>
 # Assembles the tree that becomes <bundle>/lib (= java_home for a statically
 # linked iOS JVM) in the app:
@@ -80,15 +106,18 @@ jlink_tiny_runtime() {
 #                                  (sun.util.calendar.ZoneInfoFile reads
 #                                  <java_home>/lib/tzdb.dat)
 #   libjimage.dylib/libj2pkcs11.dylib
-#                                  0-byte markers for JDK-internal libraries
-#                                  that are statically linked but requested
-#                                  via System.loadLibrary: the marker's
+#                                  minimal valid Mach-O markers for the
+#                                  given SDK (see make_marker_dylibs) for
+#                                  JDK-internal libraries that are
+#                                  statically linked but requested via
+#                                  System.loadLibrary: the marker's
 #                                  existence routes the load through
 #                                  NativeLibraries.findBuiltinLib
 #                                  (JNI_OnLoad_<name> in the process image)
 #                                  and skips dlopen entirely.
+# stage_runtime_lib <jlink_out_dir> <boot_jdk> <dest_lib_dir> [sdk]
 stage_runtime_lib() {
-  local runtime_out="$1" boot_jdk="$2" dest="$3"
+  local runtime_out="$1" boot_jdk="$2" dest="$3" sdk="${4:-iphonesimulator}"
   [[ -f "$boot_jdk/lib/tzdb.dat" ]] || die "boot JDK lacks lib/tzdb.dat: $boot_jdk"
   [[ -d "$boot_jdk/conf" ]] || die "boot JDK lacks conf/: $boot_jdk"
   rm -rf "$dest"
@@ -97,5 +126,5 @@ stage_runtime_lib() {
   cp "$runtime_out/release" "$dest/release"
   cp -R "$boot_jdk/conf" "$dest/conf"
   cp "$boot_jdk/lib/tzdb.dat" "$dest/lib/tzdb.dat"
-  touch "$dest/libjimage.dylib" "$dest/libj2pkcs11.dylib"
+  make_marker_dylibs "$dest" "$sdk"
 }

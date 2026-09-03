@@ -35,7 +35,7 @@ fi
 # The runtime tree mirrors <bundle>/lib (java_home) in the app, including the
 # boot-JDK-derived conf/ + lib/tzdb.dat and the builtin-lib marker files, so
 # the deliverable is complete without a simulator build.
-stage_runtime_lib "$JAVA_BUNDLE_DIR" "$BOOT_JDK" "$DIST_DIR/runtime"
+stage_runtime_lib "$JAVA_BUNDLE_DIR" "$BOOT_JDK" "$DIST_DIR/runtime" iphoneos
 
 printf '%s\n' "${native_libs[@]}" > "$DIST_DIR/meta/native-input-libs.txt"
 cp "$GEN_DIR/native-keep-symbols.txt" "$DIST_DIR/meta/native-keep-symbols.txt"

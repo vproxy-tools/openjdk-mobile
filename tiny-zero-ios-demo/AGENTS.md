@@ -36,7 +36,9 @@ ALL-UNNAMED"], …)`。vproxy **零修改**；`-Djava.home` 不传（os_bsd 推�
   解析都以主可执行文件为前提）。
 - 模拟器：`com.apple.security.cs.allow-jit` entitlement + 每次构建后
   `codesign -f -s -` 补签（ad-hoc 签名丢 entitlement）。
-- `<bundle>/lib` 树（modules/release/conf/tzdb.dat/两个 0 字节 marker）
+- `<bundle>/lib` 树（modules/release/conf/tzdb.dat/两个极小 Mach-O
+marker dylib——内容不会被加载，但外部签名工具要求每个 `.dylib`
+都是合法 Mach-O，0 字节会被拒）
   由 `support/build-sim-jvm.sh`（模拟器）或
   `support/run-device-demo.py`（真机，从 dist/device/runtime 拷贝）装配，
   两侧共用 `tiny-zero-ios-build/scripts/lib/runtime-image.sh`，布局保持
@@ -101,6 +103,8 @@ expiration 必须 `setTaskCompleted`：悬空任务会被系统 SIGKILL 进程�
   必须用 `--` 与 devicectl 自身参数分隔；个人团队描述文件 7 天有效，
   过期先靠 `-allowProvisioningUpdates` 无人值守续签（依赖 Xcode 的
   Apple ID 会话）；HTTP 验证默认走 `<设备名>.local`。
+- 打包未签名 ipa（分发）：`support/package-ipa.py`（无签名构建 +
+  `Payload/` 打包 + bundle 校验；接收方自行签名安装）。
 - 真机崩溃排查：hs_err 在 app 沙盒 `tmp/`（`devicectl device copy from
   --domain-type appDataContainer --domain-identifier <id> --source tmp/`）；
   模拟器每个 SIGSEGV 有 `[zero-sig] addr/pc` 输出（signals_posix 修复内）。

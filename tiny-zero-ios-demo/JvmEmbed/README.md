@@ -35,7 +35,8 @@ JvmEmbed/
    `<bundle>/lib/lib/modules`、`<bundle>/lib/release`、
    `<bundle>/lib/conf/`、`<bundle>/lib/lib/tzdb.dat`、
    `<bundle>/lib/libjimage.dylib` 与 `<bundle>/lib/libj2pkcs11.dylib`
-   (0 字节 marker,见 AGENTS.md 的静态库协议说明)。
+   (极小合法 Mach-O stub,内容不会被加载,签名工具要求合法 Mach-O;
+   见 AGENTS.md 的静态库协议说明)。
 4. Java 载荷:主程序 jar + 由 `JvmEmbed/Java` 编译出的 bootstrap jar
    一起放进 bundle 资源(参考 `../support/build-java.sh`),classpath
    顺序为 `主程序.jar:bootstrap.jar`。

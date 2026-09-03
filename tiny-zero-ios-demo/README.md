@@ -85,6 +85,19 @@ LAUNCH_ARGS="-autostart -direct" ./support/run-device-demo.py  # 前台直启
 Xcode GUI 选 team 并 Run 一次生成本机描述文件；手机需保持解锁；详细
 行为与续签逻辑见 `AGENTS.md`。
 
+## 打包未签名 ipa（分发）
+
+```bash
+./support/package-ipa.py    # → build/TinyHttpServer-<CONFIG>-unsigned.ipa
+```
+
+无签名（`CODE_SIGNING_ALLOWED=NO`）真机构建 + 标准 `Payload/` 打包，
+自带校验（二进制确未签名、modules/tzdb/marker/jar 齐全）。接收方用
+iLoader/Sideloadly/AltStore 等工具以**自己的证书**签名安装（免费个人
+证书同样 7 天有效）；`BGTaskSchedulerPermittedIdentifiers` 已在
+Info.plist，接收方签名后后台模式直接可用。`CONFIG=Release` 切换构建
+配置。
+
 ## 手动操作（等价于一键脚本）
 
 ```bash
