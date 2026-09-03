@@ -41,8 +41,14 @@ CONFIG = os.environ.get("CONFIG", "Debug")
 TEAM_ID = os.environ.get("TEAM_ID", "")
 APP_PATH = os.path.join(BUILD_DIR, "Build", "Products",
                         f"{CONFIG}-iphoneos", "TinyHttpServer.app")
+# The team id lands in the default file name so a team-suffixed build can
+# never be confused with the plain one (handing out the wrong variant is
+# exactly how background mode breaks on rewritten installs).
 OUTPUT = os.environ.get(
-    "OUTPUT", os.path.join(BUILD_DIR, f"TinyHttpServer-{CONFIG}-unsigned.ipa"))
+    "OUTPUT",
+    os.path.join(BUILD_DIR, f"TinyHttpServer-{CONFIG}"
+                 + (f"-team-{TEAM_ID}" if TEAM_ID else "")
+                 + "-unsigned.ipa"))
 
 
 def die(message):
