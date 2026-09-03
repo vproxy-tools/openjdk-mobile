@@ -126,7 +126,22 @@ Release）、`OUTPUT`（输出路径）、`TEAM_ID`（见下）。
 指定 `TEAM_ID` 时输出文件名自动带 `team-<TEAMID>`（与通用包区分、
 不会互相覆盖）；不指定则不添加任何条目，plist 只含原始标识。
 
-**解决二：保留原始 bundle id 安装**
+**解决二：接收方自行改写 ipa（无需开发者）**
+
+把通用包和 `support/patch-ipa-team.py`（单文件、纯标准库，Windows
+也可运行）一起发给接收方，在任意有 Python 的电脑上执行：
+
+```bash
+python3 patch-ipa-team.py TinyHttpServer-Debug-unsigned.ipa 2XC9XJ2N34
+# → TinyHttpServer-Debug-unsigned-2XC9XJ2N34.ipa
+```
+
+team id 从 app 报错里的改写后 bundle id 取末段（步骤同解决一第 2 步）。
+脚本把 `<bundle>.<TEAMID>.continuedProcessing.demo` **追加**进白名单
+（保留原条目、对已打补丁的包重复执行幂等、保留 zip 条目元数据），
+改完的 ipa 用 iLoader 正常签名安装即可，后台模式可用。
+
+**解决三：保留原始 bundle id 安装**
 
 用不改写 bundle id 的方式签名安装，通用包后台模式直接可用：
 Sideloadly 的保留选项、TrollStore 免签安装、或 Mac 端
