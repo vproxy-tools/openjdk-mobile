@@ -11,25 +11,17 @@ Environment overrides:
   CONFIG   build configuration (default: Debug - the configuration all
            device validation ran on; Release also works)
   OUTPUT   ipa output path (default: build/TinyHttpServer-<CONFIG>-unsigned.ipa)
-  TEAM_ID  recipient's signing team id. Sideload tools rewrite the bundle
-           identifier to <bundle>.<TEAMID>, but iLoader fails to rewrite
-           BGTaskSchedulerPermittedIdentifiers accordingly (its bug), so
-           background mode breaks on such installs. When TEAM_ID is given,
-           the team-suffixed task identifier
-           (<bundle>.<TEAMID>.continuedProcessing.demo, dot separated) is
-           baked into the plist next to the plain entry; when omitted,
-           nothing is added.
 
 Notes for recipients:
   - The loader re-signs the app with the recipient's own account; a free
     personal team profile then expires after 7 days, same as a local build.
   - Background (BGContinuedProcessingTask) mode needs the task identifier
-    to be permitted by the plist; install without a bundle-id rewrite, or
-    package with the recipient's TEAM_ID as above.
+    to be permitted by the plist; for installs whose bundle id gets
+    rewritten by the signing tool (iLoader), patch the ipa afterwards with
+    support/patch-ipa-team.py (see README).
 """
 
 import os
-import plistlib
 import subprocess
 import sys
 import zipfile
@@ -38,17 +30,10 @@ DEMO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TINY_ROOT = os.path.abspath(os.path.join(DEMO_ROOT, "..", "tiny-zero-ios-build"))
 BUILD_DIR = os.path.join(DEMO_ROOT, "build")
 CONFIG = os.environ.get("CONFIG", "Debug")
-TEAM_ID = os.environ.get("TEAM_ID", "")
 APP_PATH = os.path.join(BUILD_DIR, "Build", "Products",
                         f"{CONFIG}-iphoneos", "TinyHttpServer.app")
-# The team id lands in the default file name so a team-suffixed build can
-# never be confused with the plain one (handing out the wrong variant is
-# exactly how background mode breaks on rewritten installs).
 OUTPUT = os.environ.get(
-    "OUTPUT",
-    os.path.join(BUILD_DIR, f"TinyHttpServer-{CONFIG}"
-                 + (f"-team-{TEAM_ID}" if TEAM_ID else "")
-                 + "-unsigned.ipa"))
+    "OUTPUT", os.path.join(BUILD_DIR, f"TinyHttpServer-{CONFIG}-unsigned.ipa"))
 
 
 def die(message):
@@ -70,29 +55,6 @@ def rebuild_device_markers():
         ["bash", "-c",
          f"source '{runtime_image}' && make_marker_dylibs '{lib}' iphoneos"],
         check=True)
-
-
-def bake_team_identifier_entry():
-    """Appends the team-suffixed task identifier to the plist whitelist.
-
-    iLoader rewrites the bundle id to <bundle>.<TEAMID> but leaves
-    BGTaskSchedulerPermittedIdentifiers untouched (its bug); the app then
-    derives <bundle>.<TEAMID>.continuedProcessing.demo at runtime, which the
-    plist must list literally (the gate is exact-match only). Editing the
-    plist after the build is safe here: the app is unsigned.
-    """
-    if not TEAM_ID:
-        return
-    plist_path = os.path.join(APP_PATH, "Info.plist")
-    with open(plist_path, "rb") as f:
-        plist = plistlib.load(f)
-    entries = plist.setdefault("BGTaskSchedulerPermittedIdentifiers", [])
-    team_entry = f"{plist['CFBundleIdentifier']}.{TEAM_ID}.continuedProcessing.demo"
-    if team_entry not in entries:
-        entries.append(team_entry)
-    with open(plist_path, "wb") as f:
-        plistlib.dump(plist, f)
-    print(f"    BGTask identifier for team {TEAM_ID}: {team_entry}")
 
 
 def main():
@@ -125,8 +87,6 @@ def main():
             print(f"    {line}", file=sys.stderr)
         die(f"unsigned build failed (full log: {build_log})")
     print("    BUILD SUCCEEDED")
-
-    bake_team_identifier_entry()
 
     # Sanity: the bundle must be truly unsigned and self-contained.
     codesign = subprocess.run(["codesign", "-dv", APP_PATH],

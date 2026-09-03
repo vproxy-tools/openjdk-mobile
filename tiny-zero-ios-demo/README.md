@@ -95,7 +95,7 @@ Xcode GUI 选 team 并 Run 一次生成本机描述文件；手机需保持解�
 自带校验（二进制确未签名、modules/tzdb/marker 为合法 Mach-O/jar 齐全）。
 接收方用 iLoader/Sideloadly/AltStore 等工具以**自己的证书**签名安装
 （免费个人证书同样 7 天有效）。环境变量：`CONFIG`（默认 Debug，可选
-Release）、`OUTPUT`（输出路径）、`TEAM_ID`（见下）。
+Release）、`OUTPUT`（输出路径）。
 
 ### 后台模式与 iLoader 的 bundle id 改写
 

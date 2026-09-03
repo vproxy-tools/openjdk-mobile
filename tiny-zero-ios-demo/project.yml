@@ -45,9 +45,8 @@ targets:
         # concrete identifier the app derives at runtime
         # ("<bundle>.continuedProcessing.demo") must be listed literally.
         # Sideload tools that rewrite the bundle id (iLoader appends
-        # ".<TEAMID>") do NOT rewrite this array (their bug); pass TEAM_ID
-        # to support/package-ipa.py to additionally bake the team-suffixed
-        # identifier into the distributed plist.
+        # ".<TEAMID>") do NOT rewrite this array (their bug); receivers
+        # patch the distributed ipa with support/patch-ipa-team.py.
         BGTaskSchedulerPermittedIdentifiers:
           - $(PRODUCT_BUNDLE_IDENTIFIER).continuedProcessing.demo
         UILaunchScreen: {}
