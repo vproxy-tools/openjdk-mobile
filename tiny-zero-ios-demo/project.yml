@@ -27,14 +27,14 @@ targets:
       properties:
         CFBundleDisplayName: Tiny Zero Demo
         # BGTaskSchedulerPermittedIdentifiers matches EXACT entries only
-        # (trailing and middle wildcards were both verified NOT to match
-        # across dot segments on iOS 26.5), so the concrete identifier must
-        # be listed literally; the wildcard entry is kept for documentation
-        # and future OS behavior. Sideload tools that rewrite the bundle id
-        # (append ".<TEAMID>") cannot pass this gate - the app detects that
-        # at runtime and reports it (JvmEmbed/Swift/BackgroundExecution.swift).
+        # (verified on iOS 26.5: wildcard entries match nothing), so the
+        # concrete identifier the app derives at runtime
+        # ("<bundle>.continuedProcessing.demo") must be listed literally.
+        # Sideload tools that rewrite the bundle id (iLoader appends
+        # ".<TEAMID>") do NOT rewrite this array (their bug); pass TEAM_ID
+        # to support/package-ipa.py to additionally bake the team-suffixed
+        # identifier into the distributed plist.
         BGTaskSchedulerPermittedIdentifiers:
-          - $(PRODUCT_BUNDLE_IDENTIFIER).continuedProcessing.*
           - $(PRODUCT_BUNDLE_IDENTIFIER).continuedProcessing.demo
         UILaunchScreen: {}
     settings:

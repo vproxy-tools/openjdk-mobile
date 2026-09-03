@@ -137,7 +137,8 @@ final class ContinuedProcessingBackgroundExecution: BackgroundExecution {
         guard permitted.contains(continuedIdentifier) else {
             lastError = "bundle id 被安装工具改写(\(continuedBundleID)),"
                 + "任务标识 \(continuedIdentifier) 不在 BGTaskSchedulerPermittedIdentifiers "
-                + "白名单;请关闭「后台任务」开关用前台模式,或以保留原始 bundle id 的方式签名安装"
+                + "白名单;请关闭「后台任务」开关用前台模式,或以保留原始 bundle id 的方式"
+                + "签名安装,或让分发者以 TEAM_ID=<你的team id> 重新打包"
             return false
         }
 

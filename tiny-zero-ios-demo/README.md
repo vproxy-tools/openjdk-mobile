@@ -96,12 +96,20 @@ Xcode GUI 选 team 并 Run 一次生成本机描述文件；手机需保持解�
 接收方用 iLoader/Sideloadly/AltStore 等工具以**自己的证书**签名安装
 （免费个人证书同样 7 天有效）。**后台模式与 bundle id**：
 `BGTaskSchedulerPermittedIdentifiers` 白名单在 iOS 26.5 上是**纯精确
-匹配**（尾部/中间/单段通配均实测无效），而部分侧载工具会往 bundle id
-追加 team id（`com.foo.App` → `com.foo.App.<TEAMID>`），这类安装无法
-通过白名单——app 启动后台任务前会自检并明确报错，此时关闭「后台任务」
-开关用前台模式即可（功能完整，仅无后台保活）。需要后台模式的接收方，
-请用**保留原始 bundle id** 的方式安装：Sideloadly 的保留选项、TrollStore
-免签安装、或在 Mac 上用 Sideloadly/`idevicesigner` 重签原 id。
+匹配**（通配条目实测无效，故只保留具体条目）。部分侧载工具（如
+iLoader）会把 bundle id 改写为 `com.foo.App.<TEAMID>`，却**没有同步
+改写**白名单（其 bug），导致这类安装后台任务被拒——app 会自检并明确
+报错。解决办法（二选一）：
+
+```bash
+TEAM_ID=<接收方team id> ./support/package-ipa.py   # 烘入带 team 的标识
+# 或：接收方以保留原始 bundle id 的方式安装
+# （Sideloadly 保留选项 / TrollStore / Mac 端 idevicesigner 重签原 id）
+```
+
+指定 `TEAM_ID` 时会在 plist 白名单**追加**
+`<bundle>.<TEAMID>.continuedProcessing.demo`（点号隔开）；不指定则不
+添加，plist 只有原始条目。
 
 ## 手动操作（等价于一键脚本）
 
