@@ -81,6 +81,13 @@ private var continuedBundleID: String {
 }
 private var continuedIdentifier: String { "\(continuedBundleID).continuedProcessing.demo" }
 
+/// The segment the signing tool appended to the bundle id (the recipient's
+/// team id), surfaced in the remedy so it can be pasted straight into the
+/// patch-ipa-team.py command.
+private var teamSuffixHint: String {
+    continuedBundleID.split(separator: ".").last.map(String.init) ?? continuedBundleID
+}
+
 /// Must be called from `application(_:didFinishLaunchingWithOptions:)`
 /// before the app finishes launching; registering twice for the same
 /// identifier gets the process killed by the system.
@@ -137,8 +144,10 @@ final class ContinuedProcessingBackgroundExecution: BackgroundExecution {
         guard permitted.contains(continuedIdentifier) else {
             lastError = "此安装的 bundle id 被签名工具改写为 \(continuedBundleID)，"
                 + "后台任务标识 \(continuedIdentifier) 未列入 BGTaskSchedulerPermittedIdentifiers "
-                + "白名单，后台模式不可用。请将此报错复制发送给开发者，据其中的 team id "
-                + "构建专属 ipa 后后台模式即可使用；或关闭「后台任务」开关使用前台模式"
+                + "白名单，后台模式不可用（iLoader 已知问题）。用 patch-ipa-team.py 给 ipa "
+                + "打补丁后重签安装即可：python3 patch-ipa-team.py <ipa> <teamid>"
+                + "（teamid 取上面 bundle id 的末段 \(teamSuffixHint)）；"
+                + "或关闭「后台任务」开关使用前台模式"
             return false
         }
 
