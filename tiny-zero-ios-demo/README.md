@@ -99,47 +99,43 @@ Release）、`OUTPUT`（输出路径）、`TEAM_ID`（见下）。
 
 ### 后台模式与 bundle id 改写（iLoader 场景）
 
-`BGTaskSchedulerPermittedIdentifiers` 白名单在 iOS 26.5 上是**纯精确
-匹配**（通配条目实测无效，故 plist 只保留具体条目）。部分侧载工具
-（如 iLoader）签名时会把 bundle id 改写为 `com.foo.App.<TEAMID>`，
-却**没有同步改写**白名单（iLoader 的 bug）——这类安装的后台任务
-（`BGContinuedProcessingTask`）会被系统拒绝。app 会在提交前自检并
+根因是上游 bug：iLoader 签名时把 bundle id 改写为
+`com.foo.App.<TEAMID>`，却**没有同步改写**
+`BGTaskSchedulerPermittedIdentifiers`
+（[nab138/iloader#649](https://github.com/nab138/iloader/issues/649)；
+2026-09 时仍 Open、尚无修复。**该 issue 修复发布后，新版 iLoader 的
+安装不再需要本节任何补丁**）。而白名单在 iOS 26.5 上是**纯精确匹配**
+（通配条目实测无效，故 plist 只保留具体条目），于是运行时推导的任务
+标识（`BGContinuedProcessingTask`）被系统拒绝。app 会在提交前自检并
 给出含 team id 的明确报错（错误卡片带一键复制）；前台模式不受影响。
 
-**解决一：构建专属 ipa（完整流程）**
-
-1. 接收方安装通用包后开启后台模式，得到报错，点「复制」发给开发者；
-2. 报错中的改写后 bundle id 形如
-   `com.wkgcass.TinyHttpServer.<TEAMID>`——末段就是 team id（例如
-   `2XC9XJ2N34`）；
-3. 开发者据此打包（team id 以点号隔开烘入 plist 白名单，追加
-   `<bundle>.<TEAMID>.continuedProcessing.demo`）：
-
-   ```bash
-   TEAM_ID=2XC9XJ2N34 ./support/package-ipa.py
-   # → build/TinyHttpServer-Debug-team-2XC9XJ2N34-unsigned.ipa
-   ```
-
-4. 把该 ipa 发回，接收方用 iLoader 重装，后台模式即可用（真机已
-   验证）。
-
-指定 `TEAM_ID` 时输出文件名自动带 `team-<TEAMID>`（与通用包区分、
-不会互相覆盖）；不指定则不添加任何条目，plist 只含原始标识。
-
-**解决二：接收方自行改写 ipa（无需开发者）**
+**解决一：接收方自行改写 ipa（推荐，无需开发者）**
 
 把通用包和 `support/patch-ipa-team.py`（单文件、纯标准库，Windows
-也可运行）一起发给接收方，在任意有 Python 的电脑上执行：
+也可运行）发给接收方。team id 取自 app 报错里改写后 bundle id
+（形如 `com.wkgcass.TinyHttpServer.<TEAMID>`）的**末段**，然后在任意
+有 Python 的电脑上执行：
 
 ```bash
 python3 patch-ipa-team.py TinyHttpServer-Debug-unsigned.ipa 2XC9XJ2N34
 # → TinyHttpServer-Debug-unsigned-2XC9XJ2N34.ipa
 ```
 
-team id 从 app 报错里的改写后 bundle id 取末段（步骤同解决一第 2 步）。
 脚本把 `<bundle>.<TEAMID>.continuedProcessing.demo` **追加**进白名单
 （保留原条目、对已打补丁的包重复执行幂等、保留 zip 条目元数据），
-改完的 ipa 用 iLoader 正常签名安装即可，后台模式可用。
+改完的 ipa 用 iLoader 正常签名安装，后台模式即可用（真机已验证）。
+
+**解决二：让开发者构建专属 ipa**
+
+与解决一等价，由开发者在打包时直接烘入 team 条目（省去接收方操作）：
+
+```bash
+TEAM_ID=2XC9XJ2N34 ./support/package-ipa.py
+# → build/TinyHttpServer-Debug-team-2XC9XJ2N34-unsigned.ipa
+```
+
+指定 `TEAM_ID` 时输出文件名自动带 `team-<TEAMID>`；不指定则不添加
+任何条目，plist 只含原始标识。
 
 **解决三：保留原始 bundle id 安装**
 
