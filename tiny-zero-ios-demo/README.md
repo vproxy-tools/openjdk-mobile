@@ -94,22 +94,43 @@ Xcode GUI 选 team 并 Run 一次生成本机描述文件；手机需保持解�
 无签名（`CODE_SIGNING_ALLOWED=NO`）真机构建 + 标准 `Payload/` 打包，
 自带校验（二进制确未签名、modules/tzdb/marker 为合法 Mach-O/jar 齐全）。
 接收方用 iLoader/Sideloadly/AltStore 等工具以**自己的证书**签名安装
-（免费个人证书同样 7 天有效）。**后台模式与 bundle id**：
+（免费个人证书同样 7 天有效）。环境变量：`CONFIG`（默认 Debug，可选
+Release）、`OUTPUT`（输出路径）、`TEAM_ID`（见下）。
+
+### 后台模式与 bundle id 改写（iLoader 场景）
+
 `BGTaskSchedulerPermittedIdentifiers` 白名单在 iOS 26.5 上是**纯精确
-匹配**（通配条目实测无效，故只保留具体条目）。部分侧载工具（如
-iLoader）会把 bundle id 改写为 `com.foo.App.<TEAMID>`，却**没有同步
-改写**白名单（其 bug），导致这类安装后台任务被拒——app 会自检并明确
-报错（错误卡片带一键复制，可直接转发给开发者构建专属 ipa）。解决办法（二选一）：
+匹配**（通配条目实测无效，故 plist 只保留具体条目）。部分侧载工具
+（如 iLoader）签名时会把 bundle id 改写为 `com.foo.App.<TEAMID>`，
+却**没有同步改写**白名单（iLoader 的 bug）——这类安装的后台任务
+（`BGContinuedProcessingTask`）会被系统拒绝。app 会在提交前自检并
+给出含 team id 的明确报错（错误卡片带一键复制）；前台模式不受影响。
 
-```bash
-TEAM_ID=<接收方team id> ./support/package-ipa.py   # 烘入带 team 的标识
-# 或：接收方以保留原始 bundle id 的方式安装
-# （Sideloadly 保留选项 / TrollStore / Mac 端 idevicesigner 重签原 id）
-```
+**解决一：构建专属 ipa（完整流程）**
 
-指定 `TEAM_ID` 时会在 plist 白名单**追加**
-`<bundle>.<TEAMID>.continuedProcessing.demo`（点号隔开）；不指定则不
-添加，plist 只有原始条目。
+1. 接收方安装通用包后开启后台模式，得到报错，点「复制」发给开发者；
+2. 报错中的改写后 bundle id 形如
+   `com.wkgcass.TinyHttpServer.<TEAMID>`——末段就是 team id（例如
+   `2XC9XJ2N34`）；
+3. 开发者据此打包（team id 以点号隔开烘入 plist 白名单，追加
+   `<bundle>.<TEAMID>.continuedProcessing.demo`）：
+
+   ```bash
+   TEAM_ID=2XC9XJ2N34 ./support/package-ipa.py
+   # → build/TinyHttpServer-Debug-team-2XC9XJ2N34-unsigned.ipa
+   ```
+
+4. 把该 ipa 发回，接收方用 iLoader 重装，后台模式即可用（真机已
+   验证）。
+
+指定 `TEAM_ID` 时输出文件名自动带 `team-<TEAMID>`（与通用包区分、
+不会互相覆盖）；不指定则不添加任何条目，plist 只含原始标识。
+
+**解决二：保留原始 bundle id 安装**
+
+用不改写 bundle id 的方式签名安装，通用包后台模式直接可用：
+Sideloadly 的保留选项、TrollStore 免签安装、或 Mac 端
+Sideloadly/`idevicesigner` 以原 id 重签。
 
 ## 手动操作（等价于一键脚本）
 
