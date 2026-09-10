@@ -36,6 +36,15 @@ targets:
       - path: third_party/lib
         type: folder
         buildPhase: resources
+      # vproxy native frameworks for -Dvfd=posix (libpni + libvfdposix).
+      # Staged per-SDK into third_party/Frameworks by support/stage-frameworks.sh
+      # before xcodebuild (device and simulator slices differ); embedded into
+      # <bundle>/Frameworks, where the app's standard @executable_path/Frameworks
+      # rpath resolves libvfdposix's dependency on libpni. The JVM loads them
+      # via System.loadLibrary with -Djava.library.path pointing at the two
+      # framework directories (see JvmModel.launchJVM).
+      - path: third_party/Frameworks/libpni.framework
+      - path: third_party/Frameworks/libvfdposix.framework
     info:
       path: App/Info.plist
       properties:

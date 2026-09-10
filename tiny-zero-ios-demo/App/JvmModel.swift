@@ -326,6 +326,18 @@ final class JvmModel {
             return
         }
 
+        // vproxy runs with -Dvfd=posix, so its PosixFDs loads the embedded
+        // libvfdposix framework through System.loadLibrary; both vproxy native
+        // frameworks must be present in <bundle>/Frameworks.
+        let frameworksDir = Bundle.main.bundleURL.appendingPathComponent("Frameworks").path
+        for fw in ["libpni", "libvfdposix"] {
+            guard FileManager.default.fileExists(atPath: "\(frameworksDir)/\(fw).framework/\(fw).dylib") else {
+                phase = .idle
+                reportError("bundle 缺少 \(fw).framework(-Dvfd=posix 需要);请重跑 support/build-java.sh 并重新构建 app")
+                return
+            }
+        }
+
         // vproxy reads ${user.home}/.vproxy/resolv.conf before
         // /etc/resolv.conf; the bridge collects the system DNS servers into
         // that file via libresolv (same path on simulator and device).
@@ -343,10 +355,22 @@ final class JvmModel {
         // documented `java -jar vproxy.jar -Deploy=helloworld` launch.
         // The --add-exports is vproxy's own suggestion at startup: it enables
         // its JDKUnsafe path instead of falling back with a reflection
-        // warning.
+        // warning. --enable-native-access keeps PNI's foreign-function
+        // downcalls into the frameworks warning-free.
+        // -Dvfd=posix makes vproxy use the native PosixFDs implementation
+        // (epoll/kqueue-style ae event loop via libae) instead of the JDK
+        // NIO based one; System.loadLibrary resolves "vfdposix" because
+        // java.library.path lists the framework directories, whose inner
+        // dylibs are named lib<name>.dylib exactly as the JVM expects.
+        // libpni is on the path too: it is normally pulled in by dyld as
+        // libvfdposix's @rpath dependency, but listing it keeps an explicit
+        // System.loadLibrary("pni") working as well.
         var cArgs = makeCStringArray(["-Deploy=helloworld"])
         var cVmOptions = makeCStringArray(
-            ["--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED"])
+            ["--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED",
+             "--enable-native-access=ALL-UNNAMED",
+             "-Dvfd=posix",
+             "-Djava.library.path=\(frameworksDir)/libpni.framework:\(frameworksDir)/libvfdposix.framework"])
         defer {
             freeCStringArray(cArgs)
             freeCStringArray(cVmOptions)

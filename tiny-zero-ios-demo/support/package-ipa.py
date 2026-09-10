@@ -22,6 +22,7 @@ Notes for recipients:
 """
 
 import os
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -57,6 +58,32 @@ def rebuild_device_markers():
         check=True)
 
 
+def stage_device_frameworks():
+    """Stages the iphoneos variant of the vproxy frameworks.
+
+    build-java.sh stages the simulator variant by default (the documented
+    sim-first flow); the unsigned device build needs the device slice in
+    third_party/Frameworks.
+    """
+    subprocess.run(["./support/stage-frameworks.sh", "iphoneos"],
+                   cwd=DEMO_ROOT, check=True)
+
+
+def sync_device_static_lib():
+    """Refreshes third_party/libtinyjvm.a from the device pipeline dist.
+
+    The dist archive is the authoritative device JVM (symbol keeper,
+    fallbackLinker/syslookup, port fixes); a stale third_party copy from an
+    older device build would link an app whose -Dvfd=posix path is broken.
+    """
+    dist_lib = os.path.join(TINY_ROOT, "dist", "device", "lib", "libtinyjvm.a")
+    local_lib = os.path.join(DEMO_ROOT, "third_party", "libtinyjvm.a")
+    if os.path.exists(dist_lib):
+        if os.path.getmtime(dist_lib) > os.path.getmtime(local_lib):
+            print("==> copying libtinyjvm.a from dist/device")
+            shutil.copy(dist_lib, local_lib)
+
+
 def main():
     sys.stdout.reconfigure(line_buffering=True)
     if subprocess.run(["which", "xcodegen"], capture_output=True).returncode != 0:
@@ -67,10 +94,15 @@ def main():
     if not os.path.isdir(os.path.join(DEMO_ROOT, "third_party", "lib")):
         die("third_party/lib missing; run ./support/build-sim-jvm.sh once to "
             "stage the runtime tree")
+    if not os.path.isdir(os.path.join(DEMO_ROOT, "third_party", "vproxy-frameworks")):
+        die("third_party/vproxy-frameworks missing; run ./support/build-java.sh "
+            "once (builds the libpni/libvfdposix frameworks)")
 
     # The bundle's lib/ folder is copied from third_party/lib at BUILD time,
     # so the iphoneos markers must be in place before xcodebuild runs.
+    sync_device_static_lib()
     rebuild_device_markers()
+    stage_device_frameworks()
 
     print(f"==> [1/2] unsigned device build ({CONFIG}, CODE_SIGNING_ALLOWED=NO)")
     subprocess.run(["xcodegen", "generate"], cwd=DEMO_ROOT,
@@ -95,12 +127,17 @@ def main():
         die("unexpected: the built app carries a signature")
     for must_exist in ("lib/lib/modules", "lib/lib/tzdb.dat",
                        "lib/libjimage.dylib", "lib/libj2pkcs11.dylib",
+                       "Frameworks/libpni.framework/libpni.dylib",
+                       "Frameworks/libvfdposix.framework/libvfdposix.dylib",
                        "vproxy.jar", "vproxy-ios-bootstrap.jar"):
         if not os.path.exists(os.path.join(APP_PATH, must_exist)):
             die(f"bundle incomplete: {must_exist} missing")
-    # The marker dylibs must be valid Mach-O: external signing tools reject
-    # anything else ("file is too small" from iLoader on 0-byte markers).
-    for marker in ("lib/libjimage.dylib", "lib/libj2pkcs11.dylib"):
+    # The marker dylibs (and the embedded vproxy frameworks) must be valid
+    # Mach-O: external signing tools reject anything else ("file is too
+    # small" from iLoader on 0-byte markers).
+    for marker in ("lib/libjimage.dylib", "lib/libj2pkcs11.dylib",
+                   "Frameworks/libpni.framework/libpni.dylib",
+                   "Frameworks/libvfdposix.framework/libvfdposix.dylib"):
         with open(os.path.join(APP_PATH, marker), "rb") as f:
             magic = f.read(4)
         if magic not in (b"\xcf\xfa\xed\xfe",   # MH_MAGIC_64

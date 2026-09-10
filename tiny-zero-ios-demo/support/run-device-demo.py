@@ -141,14 +141,22 @@ def assemble_device_artifacts():
         shutil.rmtree(local_runtime)
     shutil.copytree(dist_runtime, local_runtime)
 
+    # The embedded vproxy frameworks (Frameworks/) must carry the iphoneos
+    # slice for a device build; build-java.sh stages the simulator variant.
+    run(["./support/stage-frameworks.sh", "iphoneos"], cwd=DEMO_ROOT, check=True)
+
     print("==> copying libtinyjvm.a from dist/device")
     shutil.copy(dist_lib, local_lib)
 
 
 def ensure_jars():
+    """Runs build-java.sh when the jars or the vproxy framework store are
+    missing (the script also stages the simulator framework variant; the
+    device flow re-stages the iphoneos one in assemble_device_artifacts)."""
     jars = [os.path.join(DEMO_ROOT, "third_party", n)
             for n in ("vproxy.jar", "vproxy-ios-bootstrap.jar")]
-    if not all(os.path.exists(p) for p in jars):
+    fw_store = os.path.join(DEMO_ROOT, "third_party", "vproxy-frameworks")
+    if not all(os.path.exists(p) for p in jars) or not os.path.isdir(fw_store):
         run(["./support/build-java.sh"], cwd=DEMO_ROOT, check=True)
 
 
@@ -294,8 +302,8 @@ def main():
     device, host = pick_device()
     print(f"==> device: {device} (LAN: {host or '?'})")
 
-    assemble_device_artifacts()
     ensure_jars()
+    assemble_device_artifacts()
 
     expires = None
     team_id = os.environ.get("TEAM_ID", "")

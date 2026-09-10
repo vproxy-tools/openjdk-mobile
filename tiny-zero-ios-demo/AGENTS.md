@@ -17,14 +17,25 @@
 ## 启动链路
 
 `JvmModel.start()` → （后台模式先 `BackgroundExecution.begin()`）→
-`launchJVM()`：bundle 资源完整性检查 → `tinyvm_write_dns_config`（经
+`launchJVM()`：bundle 资源完整性检查（lib/modules、两个 jar、
+`Frameworks/` 下的 libpni/libvfdposix）→ `tinyvm_write_dns_config`（经
 libresolv `res_9_*` 收集系统 DNS 写入 `<user.home>/.vproxy/resolv.conf`，
 模拟器与真机同一路径；失败即报错不启动）→ `tinyvm_start("vproxy.jar:
 vproxy-ios-bootstrap.jar", Documents, "io.vproxy.app.app.Main",
-["-Deploy=helloworld"], ["--add-exports=java.base/jdk.internal.misc=
-ALL-UNNAMED"], …)`。vproxy **零修改**；`-Djava.home` 不传（os_bsd 推导
-`java_home=<bundle>/lib`）；`-Duser.home` 指向 `Documents/`——真机数据
-容器**根目录只读**（模拟器可写，不要以模拟器表现推断真机）。
+["-Deploy=helloworld"], ["--add-exports=…", "--enable-native-access=
+ALL-UNNAMED", "-Dvfd=posix", "-Djava.library.path=<bundle>/Frameworks/
+libpni.framework:…/libvfdposix.framework"], …)`。vproxy **零修改**；
+`-Djava.home` 不传（os_bsd 推导 `java_home=<bundle>/lib`）；
+`-Duser.home` 指向 `Documents/`——真机数据容器**根目录只读**（模拟器
+可写，不要以模拟器表现推断真机）。
+
+`-Dvfd=posix` 让 vproxy 走原生 PosixFDs（libae 事件循环）而非 JDK NIO
+实现：`PosixFDs` 构造时 `System.loadLibrary("vfdposix")`，JVM 在
+`java.library.path` 列出的 framework 目录内找到内层
+`libvfdposix.dylib`；其对 `@rpath/libpni.framework/libpni.dylib` 的依赖
+由 app 自带的 `@executable_path/Frameworks` rpath 解析（Java 侧也会显式
+`System.loadLibrary("pni")`）。FFM downcall 走 Zero 变种静态链入的
+libfallbackLinker（见 `../tiny-zero-ios-build/AGENTS.md`）。
 
 ## 链接与 bundle 契约（改动打包/链接时必读）
 
@@ -36,13 +47,22 @@ ALL-UNNAMED"], …)`。vproxy **零修改**；`-Djava.home` 不传（os_bsd 推�
   解析都以主可执行文件为前提）。
 - 模拟器：`com.apple.security.cs.allow-jit` entitlement + 每次构建后
   `codesign -f -s -` 补签（ad-hoc 签名丢 entitlement）。
-- `<bundle>/lib` 树（modules/release/conf/tzdb.dat/两个极小 Mach-O
-marker dylib——内容不会被加载，但外部签名工具要求每个 `.dylib`
-都是合法 Mach-O，0 字节会被拒）
+- `<bundle>/lib` 树（modules/release/conf/tzdb.dat/三个极小 Mach-O
+  marker dylib——内容不会被加载，但外部签名工具要求每个 `.dylib`
+  都是合法 Mach-O，0 字节会被拒）
   由 `support/build-sim-jvm.sh`（模拟器）或
   `support/run-device-demo.py`（真机，从 dist/device/runtime 拷贝）装配，
   两侧共用 `tiny-zero-ios-build/scripts/lib/runtime-image.sh`，布局保持
   一致。
+- `<bundle>/Frameworks/{libpni,libvfdposix}.framework`：vproxy 原生库
+  （`-Dvfd=posix` 载荷，`make ios-vfdposix` 产物）。`build-java.sh` 双 SDK
+  构建到 `third_party/vproxy-frameworks/<sdk>/`，`stage-frameworks.sh`
+  把对应变体暂存到 `third_party/Frameworks/`（project.yml 以 Embed
+  Frameworks 拷入 bundle；不参与链接，仅运行时 System.loadLibrary 加载）。
+  **暂存目录与存储目录拼写必须不同**（`Frameworks` vs
+  `vproxy-frameworks`）：默认 APFS 大小写不敏感，同名会互相覆盖。模拟器
+  流程默认暂存 simulator 切片；真机/打包流程先重暂存 iphoneos 切片
+  （与 `<bundle>/lib` 的 marker dylib 同一套就地换切方案）。
 - 内部库 marker 的取舍（为什么只有 jimage/j2pkcs11 有 marker）见
   `../tiny-zero-ios-build/AGENTS.md` 的 runtime 树契约一节。
 - app 自定义 native 方法必须显式 `RegisterNatives`（静态构建中
@@ -105,6 +125,9 @@ expiration 必须 `setTaskCompleted`：悬空任务会被系统 SIGKILL 进程�
   Apple ID 会话）；HTTP 验证默认走 `<设备名>.local`。
 - 打包未签名 ipa（分发）：`support/package-ipa.py`（无签名构建 +
   `Payload/` 打包 + bundle 校验；接收方自行签名安装）。
+- 本机离线签名 ipa：`support/sign-ipa.py`（本地描述文件 + 钥匙串证书，
+  不需要手机在线；按哈希选证书避免同名二义，entitlements 取自描述文件，
+  深度 `codesign --verify`。设备/team/证书的查询命令见 README）。
 - 真机崩溃排查：hs_err 在 app 沙盒 `tmp/`（`devicectl device copy from
   --domain-type appDataContainer --domain-identifier <id> --source tmp/`）；
   模拟器每个 SIGSEGV 有 `[zero-sig] addr/pc` 输出（signals_posix 修复内）。
@@ -114,7 +137,10 @@ expiration 必须 `setTaskCompleted`：悬空任务会被系统 SIGKILL 进程�
 - Xcode 26+（含 iOS 26.5 模拟器 runtime）；`xcodegen`。
 - vproxy：`../vproxy`（同级目录）`./gradlew shadowjar` 的产物
   `build/libs/vproxy.jar`，或 `VPROXY_JAR=<路径>` 覆盖；**jar 已存在则
-  不重建**，脚本只拷贝。
+  不重建**，脚本只拷贝。libpni/libvfdposix 框架另由 vproxy 根目录的
+  `SDK_NAME=<sdk> make ios-vfdposix` 双 SDK 构建并入库
+  `third_party/vproxy-frameworks/`（已存在则跳过；`VPROXY_ROOT` 可覆盖
+  checkout 位置）。
 - Boot JDK 28、Gluon 支持包路径由 `../tiny-zero-ios-build/config/
   build.env` 提供；模拟器 libffi 由 `support/build-sim-libffi.sh` 装到
   `~/ios-sim-support/libffi`（一次性）。

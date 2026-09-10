@@ -58,6 +58,22 @@ JvmEmbed/
    `$(PRODUCT_BUNDLE_IDENTIFIER).continuedProcessing.demo`
    (identifier 规则见 `Swift/BackgroundExecution.swift` 头注释)。
 
+## 运行期原生库(FFM / System.loadLibrary)
+
+- Zero 变种没有汇编版 foreign linker,FFM(`Linker.nativeLinker()`)依赖
+  静态链入的 **libfallbackLinker**(libffi 后端)与 **libsyslookup**
+  (`Linker.defaultLookup()`);二者随
+  `../tiny-zero-ios-build` 的 `TINY_BASE_STATIC_LIBS` 进入合并静态库,
+  runtime 树中的同名 marker dylib 把 `System.loadLibrary` 路由到静态
+  副本(builtin-lib 协议,详见该仓库 AGENTS.md)。
+- 嵌入的 Java 程序如需加载**自己的**原生库(如 vproxy 的
+  `-Dvfd=posix` → libpni/libvfdposix framework):把 framework 以
+  Embed Frameworks 方式放进 `<bundle>/Frameworks/`,并在 VM options 里传
+  `-Djava.library.path=<bundle>/Frameworks/<xxx>.framework:...`
+  (framework 内层 dylib 名满足 `System.loadLibrary` 的
+  `lib<name>.dylib` 约定);库间 `@rpath` 依赖由 app 标准的
+  `@executable_path/Frameworks` rpath 解析。参考 `App/JvmModel.swift`。
+
 ## 链接要求(必须全部满足)
 
 - `OTHER_LDFLAGS`:`-lz -framework CoreFoundation -Wl,-export_dynamic`。
