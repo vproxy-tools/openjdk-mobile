@@ -1213,6 +1213,19 @@ static void *dlopen_helper(const char *filename, char *ebuf, int ebuflen) {
 #ifdef __APPLE__
 void * os::dll_load(const char *filename, char *ebuf, int ebuflen) {
   if (is_vm_statically_linked()) {
+    // tiny-zero-ios-real-dlopen: load real external libraries in static builds.
+    // Upstream's shortcut assumes every requested library is one of the
+    // statically linked JDK internal libraries and returns the process
+    // handle without loading anything. An embedding app may also ship real
+    // external JNI payloads (e.g. vproxy's libpni/libvfdposix frameworks in
+    // <bundle>/Frameworks); for those the fake "load" makes every symbol
+    // lookup miss, so try the real dlopen first and only fall back to the
+    // process handle for the JDK internal libraries, whose file usually
+    // does not even exist on the library path.
+    void* handle = dlopen_helper(filename, ebuf, ebuflen);
+    if (handle != nullptr) {
+      return handle;
+    }
     return os::get_default_process_handle();
   }
 

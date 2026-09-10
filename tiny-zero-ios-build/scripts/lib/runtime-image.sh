@@ -71,15 +71,16 @@ jlink_tiny_runtime() {
 }
 
 # make_marker_dylibs <dest_lib_dir> <sdk: iphoneos|iphonesimulator>
-# Builds the libjimage/libj2pkcs11 marker dylibs for one target platform as
-# minimal VALID Mach-O files. The JVM builtin-lib protocol only needs the
-# file to exist on the system library path - its content is never loaded
-# (findBuiltinLib resolves JNI_OnLoad_<name> in the process image and skips
-# dlopen) - but external signing tools (iLoader/Sideloadly/...) validate
-# every *.dylib in the bundle and reject non-Mach-O files ("file is too
-# small"), so 0-byte markers do not survive distribution. Device packaging
-# regenerates these for iphoneos after a simulator build staged the
-# simulator slice (same shared third_party/lib tree).
+# Builds the libjimage/libj2pkcs11/libfallbackLinker/libsyslookup marker
+# dylibs for one target platform as minimal VALID Mach-O files. The JVM
+# builtin-lib protocol only needs the file to exist on the system library
+# path - its content is never loaded (findBuiltinLib resolves
+# JNI_OnLoad_<name> in the process image and skips dlopen) - but external
+# signing tools (iLoader/Sideloadly/...) validate every *.dylib in the bundle
+# and reject non-Mach-O files ("file is too small"), so 0-byte markers do
+# not survive distribution. Device packaging regenerates these for iphoneos
+# after a simulator build staged the simulator slice (same shared
+# third_party/lib tree).
 make_marker_dylibs() {
   local dest="$1" sdk="$2" tmp name
   tmp="$(mktemp -d)"
@@ -88,7 +89,7 @@ make_marker_dylibs() {
    internal libraries through findBuiltinLib instead of dlopen. */
 void tiny_zero_builtin_lib_marker(void) {}
 EOF
-  for name in jimage j2pkcs11; do
+  for name in jimage j2pkcs11 fallbackLinker syslookup; do
     xcrun --sdk "$sdk" clang -shared -arch arm64 \
       -Wl,-install_name,@rpath/lib$name.dylib \
       -o "$dest/lib$name.dylib" "$tmp/marker.c"
@@ -105,8 +106,8 @@ EOF
 #                                  configuration nor the time-zone database
 #                                  (sun.util.calendar.ZoneInfoFile reads
 #                                  <java_home>/lib/tzdb.dat)
-#   libjimage.dylib/libj2pkcs11.dylib
-#                                  minimal valid Mach-O markers for the
+#   libjimage.dylib/libj2pkcs11.dylib/libfallbackLinker.dylib/
+#   libsyslookup.dylib            minimal valid Mach-O markers for the
 #                                  given SDK (see make_marker_dylibs) for
 #                                  JDK-internal libraries that are
 #                                  statically linked but requested via

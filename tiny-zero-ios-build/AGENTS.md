@@ -42,6 +42,11 @@ symbol keeper 的内容取决于**真实静态库里有哪些符号**，而静�
 - `JIMAGE_*` 符号用真实头 `jimage.hpp` 声明（重复声明成 void(void) 会
   构成 overload 冲突）；其余符号用通用 `void f(void);` 声明，只取地址、
   从不调用。
+- 例外：`JNI_OnLoad_fallbackLinker` 由生成器**定义真身**（返回
+  `JNI_VERSION_1_8`）并照常入表。libfallbackLinker.a 自带全部
+  `Java_..._LibFallback_*` JNI 符号但没有 `JNI_OnLoad_<lib>`（上游按
+  dlopen 动态库发布），builtin 协议又要求该符号存在于进程镜像，所以由
+  keeper 补桩；builtin 库还要求版本号 ≥ 1.8。
 
 ## 已合入源码树的 port 修复（不再有 patch 层）
 
@@ -56,6 +61,7 @@ symbol keeper 的内容取决于**真实静态库里有哪些符号**，而静�
 | `src/hotspot/cpu/zero/zeroInterpreter_zero.cpp` | 未链接方法 `from_interpreted_entry()==null` 时回退解释器入口表；常量池 cache 为空时按需 `link_class`（verify→rewrite→link）；标记 `set_callee_entry_point` |
 | `src/java.base/.../Throwable.java` | pre-init 窗口（`!VM.isBooted()`）`getOurStackTrace()` 返回空数组；标记 `VM.isBooted` |
 | `src/hotspot/os/posix/os_posix.cpp` | 静态链接时 `get_default_process_handle()` 返回 `RTLD_DEFAULT`（否则 two-level namespace 只搜主镜像，native 解析全部落入 `ClassLoader.findNative` 兜底，引导期类初始化重入时死锁/NPE 风暴）；标记 `is_vm_statically_linked` |
+| `src/hotspot/os/bsd/os_bsd.cpp` | 静态链接时 `dll_load` 先真 dlopen、失败才回退进程句柄（上游捷径假定请求的都是静态链入的 JDK 内部库；嵌入 app 携带的真实外部 JNI 库——如 vproxy 的 libpni/libvfdposix framework——会被"假加载"，所有符号查找落空）；标记 `tiny-zero-ios-real-dlopen` |
 | `src/hotspot/os/posix/signals_posix.cpp` | 模拟器信号处理器入口 lazy W^X：macOS 26 的 MAP_JIT 页严格写/执行二态，按 SIGBUS fault 方向翻转（dlsym 解析 `pthread_jit_write_protect_np`，SDK 标注 iOS 不可用但模拟器运行时存在）；附带 `[zero-sig]` SIGSEGV addr/pc 诊断输出；标记 `lazy_wx_flip` |
 | `src/hotspot/os_cpu/bsd_zero/os_bsd_zero.cpp` | darwin arm64 下 `ucontext_get_pc` 返回真实 pc（原为 `ShouldNotCallThis`，崩溃报告路径二次 fatal，hs_err 打不出 native 栈）；仅崩溃路径调用；标记 `__ss.__pc` |
 
@@ -91,7 +97,16 @@ conf/ + lib/tzdb.dat    # 三模块 jlink 镜像不带;取自 Boot JDK
                         # (tzdb 缺失 → java.util/java.time 时区全部 NoClassDefFoundError)
 libjimage.dylib         # 0 字节 marker:System.loadLibrary("jimage")
 libj2pkcs11.dylib       # 0 字节 marker:System.loadLibrary("j2pkcs11")
+libfallbackLinker.dylib # 0 字节 marker:System.loadLibrary("fallbackLinker")
 ```
+
+libfallbackLinker（libffi 版 `Linker.nativeLinker()` 后端）是 Zero 变种
+唯一的 FFM linker：`ForeignGlobals::is_foreign_linker_supported()` 在
+zero 上返回 false，没有它时 `Linker.nativeLinker()` 直接抛
+"Platform does not support native linker"，一切 FFM 用户（如 vproxy 的
+PNI、`-Dvfd=posix` 路径）在类初始化即死。它随
+`TINY_BASE_STATIC_LIBS` 静态链入，`JNI_OnLoad_fallbackLinker` 桩见
+symbol keeper 契约。
 
 marker 原理（上游自带的静态库协议，只补最后一块）：marker 存在于系统库
 路径 → `NativeLibraries.findBuiltinLib` 剥掉前后缀后在进程内查

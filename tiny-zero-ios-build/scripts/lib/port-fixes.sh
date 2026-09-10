@@ -18,6 +18,7 @@ check_port_fixes() {
       die "$file lacks '$marker' - the source tree predates the merged Tiny Zero port fixes"
   done <<'MARKERS'
 TARGET_OS_SIMULATOR src/hotspot/os/bsd/os_bsd.cpp
+tiny-zero-ios-real-dlopen src/hotspot/os/bsd/os_bsd.cpp
 set_callee_entry_point src/hotspot/cpu/zero/zeroInterpreter_zero.cpp
 VM.isBooted src/java.base/share/classes/java/lang/Throwable.java
 is_vm_statically_linked src/hotspot/os/posix/os_posix.cpp

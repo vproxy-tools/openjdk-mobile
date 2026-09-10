@@ -31,10 +31,18 @@ printf '%s\n' "${libs[@]}" > "$LIBLIST"
 raw="$(for lib in "${libs[@]}"; do xcrun nm -gU "$lib" 2>/dev/null || exit 1; done)" \
   || die "nm failed on an input archive"
 
+# JNI_OnLoad_fallbackLinker is appended by hand: the statically linked
+# fallbackLinker archive carries no JNI_OnLoad_<lib> of its own (upstream
+# ships it as a dlopened library), but the builtin-library protocol in
+# NativeLibraries.c only routes System.loadLibrary("fallbackLinker") to the
+# static copy when that symbol exists in the process image. The keeper
+# defines it below with a real signature, so the generic void(void)
+# declaration must not be emitted for it.
 printf '%s\n' "$raw" \
   | awk '{print $NF}' \
   | sed 's/^_//' \
   | grep -E '^(Java_|JNI_OnLoad|JNI_OnUnload|JIMAGE_|JDK_)' \
+  | { cat; echo "JNI_OnLoad_fallbackLinker"; } \
   | LC_ALL=C sort -u > "$SYMBOLS" || true
 
 count="$(wc -l < "$SYMBOLS" | tr -d ' ')"
@@ -59,13 +67,27 @@ count="$(wc -l < "$SYMBOLS" | tr -d ' ')"
     echo '#include "jimage.hpp"'
     echo
   fi
+  echo '#include <jni.h>'
+  echo
   echo 'extern "C" {'
   while IFS= read -r sym; do
     case "$sym" in
       JIMAGE_*) ;;
+      JNI_OnLoad_fallbackLinker) ;;
       *) printf 'void %s(void);\n' "$sym" ;;
     esac
   done < "$SYMBOLS"
+  echo '}'
+  echo
+  echo '// Real definition (not a table entry pulled from an archive): the'
+  echo '// statically linked fallbackLinker - the libffi based Linker backend'
+  echo '// for the Zero variant - needs JNI_OnLoad_fallbackLinker in the process'
+  echo '// image so NativeLibraries.findBuiltinLib resolves'
+  echo '// System.loadLibrary("fallbackLinker") without dlopen. Builtin'
+  echo '// libraries must report a version >= JNI_VERSION_1_8. The address is'
+  echo '// kept through the table below, like every other kept symbol.'
+  echo 'extern "C" jint JNI_OnLoad_fallbackLinker(JavaVM* vm, void* reserved) {'
+  echo '  return JNI_VERSION_1_8;'
   echo '}'
   echo
   echo '// Function pointers are cast to void* so entries with different real'
