@@ -168,6 +168,22 @@ xcrun devicectl device install app --device <设备名或UDID> \
   build/TinyHttpServer-Debug-signed.ipa
 ```
 
+**Windows** 上没有 `devicectl`，用 [pymobiledevice3](https://github.com/doronz88/pymobiledevice3)
+（依赖 usbmux 服务，安装 iTunes 或 Apple Devices 应用即自带）：
+
+```bat
+py -m pip install -U pymobiledevice3
+pymobiledevice3 usbmux list
+pymobiledevice3 apps install TinyHttpServer-Debug-signed.ipa
+```
+
+连接了多台设备时用 `--udid` 手动指定（UDID 即上面 `usbmux list` 列出的
+Identifier）：
+
+```bat
+pymobiledevice3 --udid 00008110-xxxxxxxxxxxxxxxx apps install TinyHttpServer-Debug-signed.ipa
+```
+
 **有效期**：免费个人团队的描述文件 7 天过期，签出的 app 同步失效
 （脚本会在临近过期时警告）。过期后**无需连接手机**即可续签：依赖
 Xcode 的 Apple ID 会话执行 `xcodebuild … -allowProvisioningUpdates`
