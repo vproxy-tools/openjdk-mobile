@@ -323,8 +323,16 @@ void ArchiveBuilder::sort_klasses() {
 address ArchiveBuilder::reserve_buffer() {
   // On 64-bit: reserve address space for archives up to the max encoded offset limit.
   // On 32-bit: use 256MB + AOT code size due to limited virtual address space.
-  size_t buffer_size = LP64_ONLY(AOTCompressedPointers::MaxMetadataOffsetBytes)
-                       NOT_LP64(256 * M + AOTCodeCache::max_aot_code_size());
+  // [ios] embedded iOS processes cannot satisfy the upstream multi-GB
+  // reservation; the dumped content is bounded by the cap, hence 2x
+  size_t buffer_size;
+  if ((size_t)MaxMetaspaceSize < 2 * G) {
+    buffer_size = align_up(2 * (size_t)MaxMetaspaceSize,
+                           AOTMetaspace::core_region_alignment());
+  } else {
+    buffer_size = LP64_ONLY(AOTCompressedPointers::MaxMetadataOffsetBytes)
+                  NOT_LP64(256 * M + AOTCodeCache::max_aot_code_size());
+  }
   ReservedSpace rs = MemoryReserver::reserve(buffer_size,
                                              AOTMetaspace::core_region_alignment(),
                                              os::vm_page_size(),

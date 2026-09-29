@@ -266,6 +266,8 @@ private:
   bool           _is_mapped;
   int            _fd;
   size_t         _file_offset;
+  // [ios] bounds the dirty-page-cache high-water mark during a dump
+  size_t         _last_sync_offset;
   const char*    _full_path;
   const char*    _base_archive_name;
   FileMapHeader* _header;

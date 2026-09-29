@@ -124,6 +124,7 @@ template <int N> static void get_header_version(char (&header_version) [N]) {
 
 FileMapInfo::FileMapInfo(const char* full_path, bool is_static) :
   _is_static(is_static), _file_open(false), _is_mapped(false), _fd(-1), _file_offset(0),
+  _last_sync_offset(0),
   _full_path(full_path), _base_archive_name(nullptr), _header(nullptr) {
   if (_is_static) {
     assert(_current_info == nullptr, "must be singleton"); // not thread safe
@@ -1063,6 +1064,18 @@ void FileMapInfo::write_bytes(const void* buffer, size_t nbytes) {
     }
   }
   _file_offset += nbytes;
+#if defined(__APPLE__)
+  // [ios] the ~26MB archive accumulates as dirty page cache until the kernel
+  // writes back - enough to blow the extension's ~50MB phys_footprint budget
+  if (_file_offset - _last_sync_offset >= 2 * M) {
+    _last_sync_offset = _file_offset;
+#ifdef F_BARRIERFSYNC
+    ::fcntl(_fd, F_BARRIERFSYNC);  // data-only barrier, cheaper than fsync
+#else
+    ::fsync(_fd);
+#endif
+  }
+#endif
 }
 
 bool FileMapInfo::is_file_position_aligned() const {
@@ -1100,6 +1113,13 @@ void FileMapInfo::write_bytes_aligned(const void* buffer, size_t nbytes) {
 
 void FileMapInfo::close() {
   if (_file_open) {
+#if defined(__APPLE__)
+    // [ios] release the still-dirty archive pages now: the host keeps this
+    // process alive after the dump, under its phys_footprint budget
+    if (::fsync(_fd) < 0) {
+      // best effort; close() flushes the page cache eventually
+    }
+#endif
     if (::close(_fd) < 0) {
       AOTMetaspace::unrecoverable_loading_error("Unable to close the shared archive file.");
     }
@@ -1535,7 +1555,14 @@ void FileMapInfo::map_or_load_heap_region() {
   }
 }
 
+#endif // INCLUDE_CDS_JAVA_HEAP (reopened inside can_use_heap_region)
+
+// [ios] must exist in every CDS build: AOTMetaspace::map_archives calls it
+// unconditionally
 bool FileMapInfo::can_use_heap_region() {
+#if !INCLUDE_CDS_JAVA_HEAP
+  return false;
+#else
   if (!has_heap_region()) {
     return false;
   }
@@ -1655,9 +1682,8 @@ bool FileMapInfo::can_use_heap_region() {
   }
 
   return true;
+#endif // INCLUDE_CDS_JAVA_HEAP (can_use_heap_region body)
 }
-
-#endif // INCLUDE_CDS_JAVA_HEAP
 
 // Unmap a memory region in the address space.
 

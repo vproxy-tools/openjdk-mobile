@@ -877,6 +877,9 @@ jint Threads::create_vm(JavaVMInitArgs* args, bool* canTryAgain) {
   if (CDSConfig::is_dumping_classic_static_archive()) {
     // Classic -Xshare:dump, aka "old workflow"
     AOTMetaspace::dump_static_archive(CHECK_JNI_ERR);
+    // [ios] the host keeps the VM alive to run main in this same process:
+    // in dump mode JVM_StartThread() silently ignores user threads
+    CDSConfig::stop_dumping_static_archive();
   } else if (CDSConfig::is_dumping_final_static_archive()) {
     tty->print_cr("Reading AOTConfiguration %s and writing AOTCache %s", AOTConfiguration, AOTCache);
     AOTMetaspace::dump_static_archive(CHECK_JNI_ERR);

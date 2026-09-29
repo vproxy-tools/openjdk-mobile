@@ -117,6 +117,8 @@ public:
   // static_archive
   static bool is_dumping_static_archive()                    { return CDS_ONLY(_is_dumping_static_archive) NOT_CDS(false); }
   static void enable_dumping_static_archive()                { CDS_ONLY(_is_dumping_static_archive = true); }
+  // [ios] leave dump mode so the same process can run the workload
+  static void stop_dumping_static_archive()                  { CDS_ONLY(_is_dumping_static_archive = false); }
 
   // A static CDS archive can be dumped in three modes:
   //

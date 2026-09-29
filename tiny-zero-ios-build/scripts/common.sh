@@ -63,7 +63,8 @@ sha256_file() {
 
 # Tiny Zero feature contract, asserted against a spec.gmk JVM_FEATURES_zero
 # line after configure (20) and again from the archived copy in dist meta
-# (80). The forbidden list lives only here.
+# (80). The forbidden list lives only here. CDS is intentionally allowed
+# (see 20-configure.sh).
 assert_tiny_jvm_features() {
   local feature_line="$1"
   local active=" ${feature_line#*=} "
@@ -71,7 +72,7 @@ assert_tiny_jvm_features() {
   for f in zero serialgc opt-size; do
     [[ "$active" == *" $f "* ]] || die "required JVM feature is missing: $f ($feature_line)"
   done
-  for f in cds compiler1 compiler2 dtrace epsilongc g1gc jfr jni-check jvmti link-time-opt management minimal parallelgc services shenandoahgc vm-structs zgc; do
+  for f in compiler1 compiler2 dtrace epsilongc g1gc jfr jni-check jvmti link-time-opt management minimal parallelgc services shenandoahgc vm-structs zgc; do
     [[ "$active" != *" $f "* ]] || die "forbidden JVM feature is active: $f ($feature_line)"
   done
 }

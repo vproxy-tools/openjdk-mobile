@@ -13,12 +13,14 @@ SOURCE_DATE_EPOCH="$(git -C "$SRC_DIR" show -s --format=%ct HEAD)"
 # - Zero interpreter
 # - Serial GC only
 # - size-optimized libjvm
-# - no CDS/JFR/JVMTI/management/services/extra collectors/VM structs
+# - CDS enabled: class metadata maps from a read-only file-backed archive,
+#   keeping it out of the iOS phys_footprint (jetsam) budget
+# - no JFR/JVMTI/management/services/extra collectors/VM structs
 #
 # C1, C2, minimal and ZGC are already unavailable for Zero in current
 # openjdk/mobile, but we do not depend on that implicitly: the post-config
 # feature assertion below is authoritative.
-JVM_FEATURES="serialgc,opt-size,-cds,-dtrace,-epsilongc,-g1gc,-jfr,-jni-check,-jvmti,-link-time-opt,-management,-parallelgc,-services,-shenandoahgc,-vm-structs"
+JVM_FEATURES="serialgc,opt-size,cds,-dtrace,-epsilongc,-g1gc,-jfr,-jni-check,-jvmti,-link-time-opt,-management,-parallelgc,-services,-shenandoahgc,-vm-structs"
 
 cd "$SRC_DIR"
 

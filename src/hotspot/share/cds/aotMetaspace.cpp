@@ -313,7 +313,15 @@ void AOTMetaspace::initialize_for_static_dump() {
   _requested_base_address = compute_shared_base(cds_max);
   SharedBaseAddress = (size_t)_requested_base_address;
 
-  size_t symbol_rs_size = LP64_ONLY(3 * G) NOT_LP64(128 * M);
+  // [ios] embedded iOS processes cannot satisfy the upstream multi-GB
+  // reservation; the region only ever holds the dumped symbols (a few MB)
+  size_t symbol_rs_size;
+  if ((size_t)MaxMetaspaceSize < 2 * G) {
+    symbol_rs_size = align_up(MAX2((size_t)MaxMetaspaceSize, (size_t)128 * M),
+                              os::vm_allocation_granularity());
+  } else {
+    symbol_rs_size = LP64_ONLY(3 * G) NOT_LP64(128 * M);
+  }
   _symbol_rs = MemoryReserver::reserve(symbol_rs_size,
                                        os::vm_allocation_granularity(),
                                        os::vm_page_size(),
